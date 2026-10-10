@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs & Desktop distributions
+dist/
+build/
+out/
+*.exe
+*.zip
+*.dmg
+*.AppImage
+
+# Logs & Temporary files
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db

@@ -1,0 +1,18 @@
+{
+  "name": "cricket-reports-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cricket Match Report Generation System (Web & Desktop)",
+  "scripts": {
+    "dev:api": "pnpm --filter @cricket-reports/api dev",
+    "dev:web": "pnpm --filter @cricket-reports/web dev",
+    "dev:desktop": "pnpm --filter @cricket-reports/desktop dev",
+    "rebuild:desktop": "pnpm --filter @cricket-reports/desktop rebuild",
+    "build": "pnpm --filter @cricket-reports/web build",
+    "package:exe": "pnpm --filter @cricket-reports/desktop package"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "esbuild": "^0.28.2"
+  }
+}

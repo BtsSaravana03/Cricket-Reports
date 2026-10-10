@@ -1,0 +1,6 @@
+appId: com.cricketreports.app
+productName: Cricket Report Studio
+directories:
+  output: dist
+win:
+  target: dir
