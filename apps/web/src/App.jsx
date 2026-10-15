@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 
 import BowlerReport from './components/BowlerReport';
+import MatchReport from './components/MatchReport';
 
 const API_BASE = '/api';
 
@@ -1958,7 +1959,7 @@ export default function App() {
           </div>
 
           {/* Player & Team Selection Controls (Shown after Data Fetched) */}
-          {isDataFetched && (
+          {isDataFetched && selectedReportType !== 'vca-postmatch' && (
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <User className="w-4 h-4 text-blue-400" /> 2. Report Target Selection
@@ -2024,7 +2025,7 @@ export default function App() {
           )}
 
           {/* Action Bar & Export Options */}
-          {isDataFetched && (
+          {isDataFetched && selectedReportType !== 'vca-postmatch' && (
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col md:flex-row items-center justify-between gap-4">
               <div>
                 <h3 className="text-base font-bold text-white">Report Preview Ready</h3>
@@ -2065,7 +2066,13 @@ export default function App() {
 
           {/* HTML REPORT PREVIEW CONTAINER */}
           {showPreview && isDataFetched && (
-            selectedReportType === 'vca-bowler' ? (
+            selectedReportType === 'vca-postmatch' ? (
+              <MatchReport
+                key={selectedMatchId}
+                ballData={ballData}
+                matchDetails={matchDetails}
+              />
+            ) : selectedReportType === 'vca-bowler' ? (
               <BowlerReport
                 ballData={ballData}
                 matchDetails={matchDetails}

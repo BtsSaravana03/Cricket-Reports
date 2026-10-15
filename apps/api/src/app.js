@@ -231,6 +231,15 @@ app.get('/api/getMatchDetails/:matchid', async (req, res) => {
     Left join Officials TVO on TVO.Id=MO.TVUmpireId
     WHERE M.ID = ?`;
 
+    // Playing XIs with batting order per innings (used by the match report for "did not bat" and batter hands)
+    const players = `SELECT T.ClubId, T.PlayerId, P.FullName, P.BattingTypeID, P.BowlingTypeID, T.WK, T.Captain, T.isSubstitute,
+       BO.InningsID, BO.BattingOrder, BO.isBat
+       FROM TEAMS T
+       JOIN PLAYERS P ON P.PlayerID = T.PlayerId
+       LEFT JOIN BATTINGORDER BO ON BO.MatchID = T.MatchId AND BO.PlayerID = T.PlayerId
+       WHERE T.MatchId = ?
+       ORDER BY T.ClubId, BO.InningsID, BO.BattingOrder`;
+
     let result = [];
     const matchResponse = getData(q, [matchId]);
     if (matchResponse?.data?.length > 0) {
@@ -241,6 +250,7 @@ app.get('/api/getMatchDetails/:matchid', async (req, res) => {
       matchResponse.data[0].MatchComplete = matchResult.data.length > 0;
       const matchInfo = getData(info, [matchId]);
       matchResponse.data[0].info = matchInfo.data[0] || null;
+      matchResponse.data[0].players = getData(players, [matchId]).data || [];
       result = matchResponse.data;
     }
     res.json(result);
