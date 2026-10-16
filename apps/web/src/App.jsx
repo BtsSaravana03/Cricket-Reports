@@ -5,7 +5,8 @@ import pptxgen from 'pptxgenjs';
 import { jsPDF } from 'jspdf';
 import {
   Trophy, Lock, User, LogOut, FileText, Presentation, Shield,
-  Layers, ChevronRight, Activity, ArrowLeft, Eye, Download, CheckCircle2, Play
+  Layers, ChevronRight, Activity, ArrowLeft, Eye, Download, CheckCircle2, Play,
+  Filter, RefreshCw
 } from 'lucide-react';
 
 import BowlerReport from './components/BowlerReport';
@@ -238,6 +239,21 @@ export default function App() {
   const [selectedBatterId, setSelectedBatterId] = useState('');
   const [selectedBowlerId, setSelectedBowlerId] = useState('');
   const [previewSlide, setPreviewSlide] = useState(1);
+
+  // Filter State for Delivery & Match Analytics
+  const [selectedPhase, setSelectedPhase] = useState('Powerplay (1–6)'); // 'All Phases (1–20)', 'Powerplay (1–6)', 'Middle (7–10)', 'Middle-Late (11–15)', 'Death Overs (16–20)'
+  const [oversRange, setOversRange] = useState({ min: 1, max: 6 });
+  const [selectedBatterHand, setSelectedBatterHand] = useState('vs RHB'); // 'All', 'vs RHB', 'vs LHB'
+  const [selectedBowlingCategory, setSelectedBowlingCategory] = useState('vs Spin'); // 'All', 'vs Pace', 'vs Spin'
+  const [selectedInningsContext, setSelectedInningsContext] = useState('1st Innings'); // '1st Innings', '2nd Innings', 'Both'
+  const [appliedFilters, setAppliedFilters] = useState({
+    phase: 'Powerplay (1–6)',
+    oversMin: 1,
+    oversMax: 6,
+    batterHand: 'vs RHB',
+    bowlingCategory: 'vs Spin',
+    inningsContext: '1st Innings'
+  });
 
   // Loading states
   const [loading, setLoading] = useState(false);
@@ -500,11 +516,136 @@ export default function App() {
     name: "DELHI CAPITALS"
   };
 
+  // Filter dataset strictly by APPLIED match & delivery filters (only rebuilds on clicking "Apply Filters" or "Reset All")
+  const filteredBallData = React.useMemo(() => {
+    if (!ballData || ballData.length === 0) return [];
+    
+    return ballData.filter((b) => {
+      // 1. Overs Range filter
+      const over = b.OverId !== undefined && b.OverId !== null 
+        ? Number(b.OverId) 
+        : Math.floor(Number(b.Overs !== undefined ? b.Overs : 0));
+      if (over < appliedFilters.oversMin || over > appliedFilters.oversMax) {
+        return false;
+      }
+
+      // 2. Batter Handedness filter
+      if (appliedFilters.batterHand === 'vs RHB' || appliedFilters.batterHand === 'vs LHB') {
+        const batType = Number(
+          b.StBattingTypeID !== undefined && b.StBattingTypeID !== null
+            ? b.StBattingTypeID
+            : (b.BatTypeID !== undefined && b.BatTypeID !== null ? b.BatTypeID : 1)
+        );
+        const hand = batType === 2 ? 'vs LHB' : 'vs RHB';
+        if (hand !== appliedFilters.batterHand) {
+          return false;
+        }
+      }
+
+      // 3. Bowling Style / Category filter (vs Pace vs Spin)
+      if (appliedFilters.bowlingCategory === 'vs Pace' || appliedFilters.bowlingCategory === 'vs Spin') {
+        const spinOrPace = b.SpinOrPace !== undefined && b.SpinOrPace !== null ? Number(b.SpinOrPace) : null;
+        let isSpin = false;
+        if (spinOrPace === 2) {
+          isSpin = true;
+        } else if (spinOrPace === 1) {
+          isSpin = false;
+        } else {
+          const bwTypeId = Number(b.BwBowlingTypeID || b.BowlingTypeID || 3);
+          isSpin = [9, 10, 11, 12].includes(bwTypeId);
+        }
+        const matchesCategory = appliedFilters.bowlingCategory === 'vs Spin' ? isSpin : !isSpin;
+        if (!matchesCategory) {
+          return false;
+        }
+      }
+
+      // 4. Innings Context filter
+      if (appliedFilters.inningsContext === '1st Innings' || appliedFilters.inningsContext === '2nd Innings') {
+        const innId = Number(b.InningsId !== undefined && b.InningsId !== null ? b.InningsId : (b.InningsID || 1));
+        const requiredInn = appliedFilters.inningsContext === '1st Innings' ? 1 : 2;
+        if (innId !== requiredInn) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [ballData, appliedFilters]);
+
+  // Count active filters in the current draft selection
+  const activeFiltersCount = React.useMemo(() => {
+    let count = 0;
+    if (selectedPhase !== 'All Phases (1–20)') count += 1;
+    if (oversRange.min !== 1 || oversRange.max !== 20) count += 1;
+    if (selectedBatterHand !== 'All') count += 1;
+    if (selectedBowlingCategory !== 'All') count += 1;
+    if (selectedInningsContext !== 'Both') count += 1;
+    return count;
+  }, [selectedPhase, oversRange, selectedBatterHand, selectedBowlingCategory, selectedInningsContext]);
+
+  // Count active applied filters
+  const activeAppliedFiltersCount = React.useMemo(() => {
+    let count = 0;
+    if (appliedFilters.phase !== 'All Phases (1–20)') count += 1;
+    if (appliedFilters.oversMin !== 1 || appliedFilters.oversMax !== 20) count += 1;
+    if (appliedFilters.batterHand !== 'All') count += 1;
+    if (appliedFilters.bowlingCategory !== 'All') count += 1;
+    if (appliedFilters.inningsContext !== 'Both') count += 1;
+    return count;
+  }, [appliedFilters]);
+
+  // Handle phase quick select
+  const handlePhaseSelect = (phaseName) => {
+    setSelectedPhase(phaseName);
+    if (phaseName === 'Powerplay (1–6)') {
+      setOversRange({ min: 1, max: 6 });
+    } else if (phaseName === 'Middle (7–10)') {
+      setOversRange({ min: 7, max: 10 });
+    } else if (phaseName === 'Middle-Late (11–15)') {
+      setOversRange({ min: 11, max: 15 });
+    } else if (phaseName === 'Death Overs (16–20)') {
+      setOversRange({ min: 16, max: 20 });
+    } else if (phaseName === 'All Phases (1–20)') {
+      setOversRange({ min: 1, max: 20 });
+    }
+  };
+
+  // Handle reset all filters
+  const handleResetFilters = () => {
+    setSelectedPhase('All Phases (1–20)');
+    setOversRange({ min: 1, max: 20 });
+    setSelectedBatterHand('All');
+    setSelectedBowlingCategory('All');
+    setSelectedInningsContext('Both');
+    setAppliedFilters({
+      phase: 'All Phases (1–20)',
+      oversMin: 1,
+      oversMax: 20,
+      batterHand: 'All',
+      bowlingCategory: 'All',
+      inningsContext: 'Both'
+    });
+  };
+
+  // Apply filters button action
+  const handleApplyFilters = () => {
+    setAppliedFilters({
+      phase: selectedPhase,
+      oversMin: oversRange.min,
+      oversMax: oversRange.max,
+      batterHand: selectedBatterHand,
+      bowlingCategory: selectedBowlingCategory,
+      inningsContext: selectedInningsContext
+    });
+  };
+
   // Ball-by-ball deliveries filtered for selected batter
   const batterBalls = React.useMemo(() => {
-    if (!selectedBatterId) return ballData;
-    return ballData.filter(b => String(b.StrikerID) === String(selectedBatterId));
-  }, [ballData, selectedBatterId]);
+    const sourceData = activeAppliedFiltersCount > 0 ? filteredBallData : ballData;
+    if (!selectedBatterId) return sourceData;
+    return sourceData.filter(b => String(b.StrikerID) === String(selectedBatterId));
+  }, [ballData, filteredBallData, selectedBatterId, activeAppliedFiltersCount]);
 
   // Phase-Wise Performance Calculation for selected batter (ODI, T20, and Test Matches)
   const phaseWiseStats = React.useMemo(() => {
@@ -1847,7 +1988,7 @@ export default function App() {
       {/* VIEW 3: MATCH REPORTS CONFIGURATION & PREVIEW */}
       {/* ------------------------------------------------------------- */}
       {currentPage === 'match_reports' && (
-        <main className="flex-1 p-6 max-w-6xl mx-auto w-full space-y-6">
+        <main className="flex-1 p-6 max-w-[1600px] mx-auto w-full space-y-6">
           <div className="flex items-center justify-between">
             <button
               onClick={() => setCurrentPage('home')}
@@ -1860,9 +2001,12 @@ export default function App() {
             </span>
           </div>
 
-          {/* Controls Panel */}
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
-            <h2 className="text-lg font-bold text-white">1. Select Competition & Match</h2>
+          <div className="flex flex-col xl:flex-row items-start gap-6">
+            {/* Left & Main Column: Controls and Report Previews */}
+            <div className="flex-1 min-w-0 w-full space-y-6">
+              {/* Controls Panel */}
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
+                <h2 className="text-lg font-bold text-white">1. Select Competition & Match</h2>
 
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
               {/* Competition Dropdown */}
@@ -2074,7 +2218,7 @@ export default function App() {
               />
             ) : selectedReportType === 'vca-bowler' ? (
               <BowlerReport
-                ballData={ballData}
+                ballData={activeAppliedFiltersCount > 0 ? filteredBallData : ballData}
                 matchDetails={matchDetails}
                 selectedTeamId={selectedTeamId}
                 selectedBowlerId={selectedBowlerId}
@@ -3575,7 +3719,206 @@ export default function App() {
             </div>
           )
         )}
-      </main>
+            </div>
+
+            {/* Right Column: Match & Delivery Filters Panel */}
+            <div className="w-full xl:w-[360px] 2xl:w-[380px] shrink-0 sticky top-6">
+              <div className="bg-[#0b121e]/95 border border-[#1e293b] rounded-2xl p-5 shadow-2xl space-y-6 text-slate-100 backdrop-blur-md">
+                {/* Header */}
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400 shadow-inner">
+                      <Filter className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-bold text-white text-base leading-tight">Match & Delivery Filters</h3>
+                        <span className="bg-blue-600 text-white text-[11px] font-bold px-2 py-0.5 rounded shadow-sm">
+                          {activeFiltersCount} Active
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-0.5">Refine dataset for bowler analytics</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={handleResetFilters}
+                    className="text-xs text-slate-400 hover:text-white font-medium transition-colors pt-0.5"
+                  >
+                    Reset All
+                  </button>
+                </div>
+
+                {/* PHASE OF PLAY */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-bold uppercase tracking-wider text-slate-300">Phase of Play</span>
+                    <span className="text-blue-400 font-semibold text-[11px]">
+                      {selectedPhase === 'All Phases (1–20)' ? 'All Phases Selected' : `${selectedPhase.split(' ')[0]} Selected`}
+                    </span>
+                  </div>
+
+                  {/* All Phases (1-20) */}
+                  <button
+                    onClick={() => handlePhaseSelect('All Phases (1–20)')}
+                    className={`w-full py-2.5 px-3 rounded-lg text-xs font-semibold text-center transition-all border ${
+                      selectedPhase === 'All Phases (1–20)'
+                        ? 'bg-blue-600 text-white border-blue-500 shadow-md shadow-blue-600/20'
+                        : 'bg-[#111927] hover:bg-[#162235] text-slate-300 border-[#1e293b]'
+                    }`}
+                  >
+                    All Phases (1–20)
+                  </button>
+
+                  {/* 2x2 Grid of specific phases */}
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { id: 'Powerplay (1–6)', label: 'Powerplay (1–6)' },
+                      { id: 'Middle (7–10)', label: 'Middle (7–10)' },
+                      { id: 'Middle-Late (11–15)', label: 'Middle-Late (11–15)' },
+                      { id: 'Death Overs (16–20)', label: 'Death Overs (16–20)' }
+                    ].map((phase) => {
+                      const isActive = selectedPhase === phase.id;
+                      return (
+                        <button
+                          key={phase.id}
+                          onClick={() => handlePhaseSelect(phase.id)}
+                          className={`relative py-2.5 px-3 rounded-lg text-xs font-semibold text-center transition-all border flex items-center justify-center ${
+                            isActive
+                              ? 'bg-blue-600 text-white border-blue-500 shadow-md shadow-blue-600/20'
+                              : 'bg-[#111927] hover:bg-[#162235] text-slate-300 border-[#1e293b]'
+                          }`}
+                        >
+                          <span>{phase.label}</span>
+                          {isActive && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-blue-200 ml-1.5 inline-block" />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* OVERS RANGE SLIDER */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-400 font-medium">Overs Range:</span>
+                    <span className="text-white font-bold text-xs">
+                      Over {oversRange.min} — Over {oversRange.max}
+                    </span>
+                  </div>
+
+                  <div className="relative pt-2 pb-1">
+                    <input
+                      type="range"
+                      min={1}
+                      max={20}
+                      step={1}
+                      value={oversRange.max}
+                      onChange={(e) => {
+                        const val = Number(e.target.value);
+                        setOversRange((prev) => ({ ...prev, max: Math.max(prev.min, val) }));
+                      }}
+                      className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                    />
+                    <div className="flex justify-between text-[10px] text-slate-500 font-semibold px-0.5 mt-1">
+                      <span>1</span>
+                      <span>6</span>
+                      <span>10</span>
+                      <span>15</span>
+                      <span>20</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* BATTER HANDEDNESS */}
+                <div className="space-y-2">
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                    Batter Handedness
+                  </div>
+                  <div className="grid grid-cols-3 gap-1 bg-[#111927] p-1 rounded-xl border border-[#1e293b]">
+                    {['All', 'vs RHB', 'vs LHB'].map((item) => {
+                      const isActive = selectedBatterHand === item;
+                      return (
+                        <button
+                          key={item}
+                          onClick={() => setSelectedBatterHand(item)}
+                          className={`py-2 rounded-lg text-xs font-semibold transition-all ${
+                            isActive
+                              ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30 font-bold'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {item}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* BOWLING STYLE / CATEGORY */}
+                <div className="space-y-2">
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                    Bowling Style / Category
+                  </div>
+                  <div className="grid grid-cols-3 gap-1 bg-[#111927] p-1 rounded-xl border border-[#1e293b]">
+                    {['All', 'vs Pace', 'vs Spin'].map((item) => {
+                      const isActive = selectedBowlingCategory === item;
+                      return (
+                        <button
+                          key={item}
+                          onClick={() => setSelectedBowlingCategory(item)}
+                          className={`py-2 rounded-lg text-xs font-semibold transition-all ${
+                            isActive
+                              ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30 font-bold'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {item}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* INNINGS CONTEXT */}
+                <div className="space-y-2">
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                    Innings Context
+                  </div>
+                  <div className="grid grid-cols-3 gap-1 bg-[#111927] p-1 rounded-xl border border-[#1e293b]">
+                    {['1st Innings', '2nd Innings', 'Both'].map((item) => {
+                      const isActive = selectedInningsContext === item;
+                      return (
+                        <button
+                          key={item}
+                          onClick={() => setSelectedInningsContext(item)}
+                          className={`py-2 rounded-lg text-xs font-semibold transition-all ${
+                            isActive
+                              ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30 font-bold'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {item}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* APPLY FILTERS BUTTON */}
+                <div className="pt-2">
+                  <button
+                    onClick={handleApplyFilters}
+                    className="w-full py-3 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-bold rounded-xl shadow-lg shadow-blue-600/30 text-xs transition-all flex items-center justify-center gap-2"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Apply Filters to Report</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </main>
       )}
 
       {/* ------------------------------------------------------------- */}
