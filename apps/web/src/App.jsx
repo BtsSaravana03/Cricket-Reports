@@ -2506,7 +2506,7 @@ export default function App() {
               </div>
 
               {/* Player & Team Selection Controls (Shown after Data Fetched) */}
-              {isDataFetched && !isMultiMatch && selectedReportType !== 'vca-postmatch' && (
+              {isDataFetched && selectedReportType !== 'vca-postmatch' && (
                 <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
                   <h3 className="text-base font-bold text-white flex items-center gap-2">
                     <User className="w-4 h-4 text-blue-400" /> 2. Report Target Selection
