@@ -2635,7 +2635,21 @@ export default function App() {
 
               {/* HTML REPORT PREVIEW CONTAINER */}
               {showPreview && isDataFetched && (
-                selectedReportType === 'vca-postmatch' ? (
+                isMultiMatch ? (
+                  selectedReportType === 'vca-postmatch' ? (
+                    <div className="bg-slate-900 border border-amber-500/40 rounded-2xl p-6 text-sm text-amber-300">
+                      The Post Match Report covers one match. Tick a single match, or switch to the Batter / Bowler report for a multi-match report.
+                    </div>
+                  ) : (
+                    <MultiMatchPlayerReport
+                      key={`${selectedReportType}-${selectedReportType === 'vca-bowler' ? selectedBowlerId : selectedBatterId}`}
+                      matchesData={multiMatchData}
+                      role={selectedReportType === 'vca-bowler' ? 'bowler' : 'batter'}
+                      playerId={selectedReportType === 'vca-bowler' ? selectedBowlerId : selectedBatterId}
+                      teamName={availableTeams.find((t) => String(t.id) === String(selectedTeamId))?.name || ''}
+                    />
+                  )
+                ) : selectedReportType === 'vca-postmatch' ? (
                   <MatchReport
                     key={selectedMatchId}
                     ballData={ballData}
