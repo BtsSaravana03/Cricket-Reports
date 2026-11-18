@@ -25,7 +25,7 @@ const PANEL_PAD = 18;            // panel padding + border, both sides
 export const GRAPHIC_KINDS = ['pitchmap', 'beehive', 'ww'];
 const GRAPHIC_TITLES = { pitchmap: 'PITCH MAP', beehive: 'BEEHIVE', ww: 'WAGON WHEEL' };
 
-const col = (label, align = 'center', w = 1) => ({ label, align, w });
+export const col = (label, align = 'center', w = 1) => ({ label, align, w });
 const shortName = (name = '') => {
   const parts = String(name).replace(/\s*\(c\)|\s*†/g, '').trim().split(/\s+/);
   return parts.length > 1 ? `${parts[0][0]} ${parts.slice(1).join(' ')}` : name;
@@ -99,7 +99,7 @@ const regionTableBlock = (balls) => {
   };
 };
 
-const graphicsSlide = (base, title, balls, graphicsKey, players, perspective) => ({
+export const graphicsSlide = (base, title, balls, graphicsKey, players, perspective) => ({
   ...base,
   title,
   cols: 3,
@@ -760,7 +760,7 @@ function TableBlock({ block }) {
                     whiteSpace: 'nowrap',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
-                    ...(styled ? { background: cell.bg, color: cell.color, border: '2px solid #ffffff' } : {})
+                    ...(styled ? { background: cell.bg, color: cell.color, ...(cell.bg ? { border: '2px solid #ffffff' } : {}) } : {})
                   }}
                 >
                   {text === null || text === undefined ? '' : String(text)}
@@ -806,7 +806,7 @@ function CoverSlide({ slide, id }) {
       <div data-pshape="" className="absolute" style={{ bottom: 32, right: 32, width: 80, height: 5, background: COLORS.navy }} />
       <div data-pshape="" className="absolute" style={{ bottom: 32, right: 32, width: 5, height: 80, background: COLORS.navy }} />
       <div className="flex-1 flex flex-col items-center justify-center text-center px-12">
-        <div data-ptext="" className="font-extrabold uppercase tracking-[0.3em] text-slate-500" style={{ fontSize: 14 }}>POST MATCH REPORT</div>
+        <div data-ptext="" className="font-extrabold uppercase tracking-[0.3em] text-slate-500" style={{ fontSize: 14 }}>{cover.kicker || 'POST MATCH REPORT'}</div>
         <div data-ptext="" className="font-black uppercase leading-tight mt-3" style={{ fontSize: 40, color: COLORS.navy }}>{cover.title}</div>
         {cover.lines.map((l, i) => (
           <div key={i} data-ptext="" className="font-bold italic uppercase text-slate-700 mt-1" style={{ fontSize: i === 0 ? 17 : 14 }}>{l}</div>

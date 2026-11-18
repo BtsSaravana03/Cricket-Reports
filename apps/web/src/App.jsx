@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import * as htmlToImage from 'html-to-image';
 import pptxgen from 'pptxgenjs';
@@ -11,6 +11,7 @@ import {
 
 import BowlerReport from './components/BowlerReport';
 import MatchReport from './components/MatchReport';
+import MultiMatchPlayerReport from './components/MultiMatchPlayerReport';
 import { printPdfDocument } from './utils/printPdf';
 
 const API_BASE = '/api';
@@ -222,7 +223,11 @@ export default function App() {
   const [competitions, setCompetitions] = useState([]);
   const [selectedCompId, setSelectedCompId] = useState('');
   const [matches, setMatches] = useState([]);
-  const [selectedMatchId, setSelectedMatchId] = useState('');
+  // One or more matches; one match keeps the single-match reports, several give multi-match Batter / Bowler reports
+  const [selectedMatchIds, setSelectedMatchIds] = useState([]);
+  const selectedMatchId = selectedMatchIds.length === 1 ? selectedMatchIds[0] : '';
+  const isMultiMatch = selectedMatchIds.length > 1;
+  const [multiMatchData, setMultiMatchData] = useState([]); // [{ details, balls }] for multi-match reports
 
   // Ball By Ball Data & Report State
   const [ballData, setBallData] = useState([]);
@@ -395,7 +400,7 @@ export default function App() {
   // 2. COMPETITION SELECTION HANDLER
   const handleCompetitionChange = async (compId) => {
     setSelectedCompId(compId);
-    setSelectedMatchId('');
+    setSelectedMatchIds([]);
     setMatches([]);
     resetMatchForm();
 
@@ -409,14 +414,22 @@ export default function App() {
     }
   };
 
-  const handleMatchChange = (matchId) => {
-    setSelectedMatchId(matchId);
+  const toggleMatch = (matchId) => {
+    const id = String(matchId);
+    setSelectedMatchIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
     resetMatchForm();
   };
+
+  const setAllMatches = (ids) => {
+    setSelectedMatchIds(ids.map(String));
+    resetMatchForm();
+  };
+
 
   const resetMatchForm = () => {
     setBallData([]);
     setMatchDetails(null);
+    setMultiMatchData([]);
     setIsDataFetched(false);
     setShowPreview(false);
     setSelectedTeamId('');
@@ -426,17 +439,21 @@ export default function App() {
 
   // 3. GENERATE REPORT BUTTON HANDLER (Fetch Ball by Ball Data & Match Details)
   const handleGenerateReport = async () => {
-    if (!selectedMatchId) return;
+    if (!selectedMatchIds.length) return;
     setLoading(true);
     try {
-      // Call Ball by Ball API
-      const bbbRes = await axios.get(`${API_BASE}/ballbyball/${selectedMatchId}`);
-      const rawData = bbbRes.data.data || [];
-      setBallData(rawData);
-
-      // Call Match Details API
-      const matchRes = await axios.get(`${API_BASE}/getMatchDetails/${selectedMatchId}`);
-      const mDetails = matchRes.data[0] || null;
+      // Ball by ball + match details for every selected match
+      const fetched = await Promise.all(selectedMatchIds.map(async (id) => {
+        const [bbbRes, matchRes] = await Promise.all([
+          axios.get(`${API_BASE}/ballbyball/${id}`),
+          axios.get(`${API_BASE}/getMatchDetails/${id}`)
+        ]);
+        return { details: matchRes.data[0] || null, balls: bbbRes.data.data || [] };
+      }));
+      const usable = fetched.filter((m) => m.details);
+      setMultiMatchData(usable);
+      setBallData(usable.flatMap((m) => m.balls));
+      const mDetails = usable[0]?.details || null;
       setMatchDetails(mDetails);
 
       // Pre-select Team A if available
@@ -2462,7 +2479,7 @@ export default function App() {
               </div>
 
               {/* Player & Team Selection Controls (Shown after Data Fetched) */}
-              {isDataFetched && selectedReportType !== 'vca-postmatch' && (
+              {isDataFetched && !isMultiMatch && selectedReportType !== 'vca-postmatch' && (
                 <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
                   <h3 className="text-base font-bold text-white flex items-center gap-2">
                     <User className="w-4 h-4 text-blue-400" /> 2. Report Target Selection
