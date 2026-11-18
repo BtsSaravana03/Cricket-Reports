@@ -237,7 +237,9 @@ expressApp.get('/api/getMatchDetails/:matchid', async (req, res) => {
        C.Name AS CompFullName,
        C.CompPrefix,
        MT.InnCount,
-       P.FullName AS MomPlayerName
+       P.FullName AS MomPlayerName,
+       CA.CLUBID as ClubAId,
+       CB.CLUBID as ClubBId
        FROM MATCH M
        JOIN CLUB CA ON CA.CLUBID = M.CLUBA
        JOIN CLUB CB ON CB.CLUBID = M.CLUBB

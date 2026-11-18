@@ -466,8 +466,9 @@ export default function App() {
       setMatchDetails(mDetails);
 
       // Pre-select Team A if available
-      if (mDetails?.ClubAId) {
-        setSelectedTeamId(String(mDetails.ClubAId));
+      const firstTeamId = mDetails?.ClubAId || mDetails?.ClubA || (usable[0]?.balls?.[0]?.BattingClubID);
+      if (firstTeamId) {
+        setSelectedTeamId(String(firstTeamId));
       }
 
       setIsDataFetched(true);
@@ -483,30 +484,49 @@ export default function App() {
   const availableTeams = React.useMemo(() => {
     const teamsMap = new Map();
 
-    if (matchDetails) {
-      if (matchDetails.ClubAId) {
-        teamsMap.set(String(matchDetails.ClubAId), matchDetails.ClubAFull || matchDetails.ClubAPrefix || 'Team A');
+    const addTeam = (id, name) => {
+      if (!id) return;
+      const sId = String(id);
+      const cleanName = (name && typeof name === 'string' && name.trim()) ? name.trim() : '';
+      if (cleanName && (!teamsMap.has(sId) || teamsMap.get(sId).startsWith('Team '))) {
+        teamsMap.set(sId, cleanName);
+      } else if (!teamsMap.has(sId)) {
+        teamsMap.set(sId, `Team ${sId}`);
       }
-      if (matchDetails.ClubBId) {
-        teamsMap.set(String(matchDetails.ClubBId), matchDetails.ClubBFull || matchDetails.ClubBPrefix || 'Team B');
+    };
+
+    // Add teams from every loaded match's details
+    const allDetails = multiMatchData?.length ? multiMatchData.map(m => m.details).filter(Boolean) : (matchDetails ? [matchDetails] : []);
+    allDetails.forEach(det => {
+      const aId = det.ClubAId || det.ClubA;
+      const aName = det.ClubAFull || det.ClubAPrefix || det.ClubAName || det.ClubA;
+      addTeam(aId, typeof aName === 'string' ? aName : null);
+
+      const bId = det.ClubBId || det.ClubB;
+      const bName = det.ClubBFull || det.ClubBPrefix || det.ClubBName || det.ClubB;
+      addTeam(bId, typeof bName === 'string' ? bName : null);
+
+      if (Array.isArray(det.inningsData)) {
+        det.inningsData.forEach(inn => {
+          if (inn.BattingClubID) addTeam(inn.BattingClubID, inn.BattingClubName || inn.BattingClubPrefix);
+          if (inn.BowlingClubID) addTeam(inn.BowlingClubID, inn.BowlingClubName || inn.BowlingClubPrefix);
+        });
       }
-    }
+    });
 
     // Discover team names from ball-by-ball delivery data
     ballData.forEach((b) => {
       const cId = b.BattingClubID;
-      if (cId) {
-        const teamName = b.BattingClubName || b.BattingClubPrefix || b.ClubName || b.ClubPrefix;
-        if (teamName && (!teamsMap.has(String(cId)) || teamsMap.get(String(cId)).startsWith('Team '))) {
-          teamsMap.set(String(cId), teamName);
-        } else if (!teamsMap.has(String(cId))) {
-          teamsMap.set(String(cId), `Team ${cId}`);
-        }
-      }
+      const teamName = b.BattingClubName || b.BattingClubPrefix || b.ClubName || b.ClubPrefix;
+      if (cId) addTeam(cId, teamName);
+
+      const bwClubId = b.BowlingClubID;
+      const bwTeamName = b.BowlingClubName || b.BowlingClubPrefix;
+      if (bwClubId) addTeam(bwClubId, bwTeamName);
     });
 
     return Array.from(teamsMap.entries()).map(([id, name]) => ({ id, name }));
-  }, [matchDetails, ballData]);
+  }, [matchDetails, multiMatchData, ballData]);
 
   // Derived unique batters filtered by selected team
   const availableBatters = React.useMemo(() => {
