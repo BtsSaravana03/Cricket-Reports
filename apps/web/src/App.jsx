@@ -10,6 +10,7 @@ import {
 
 import BowlerReport from './components/BowlerReport';
 import MatchReport from './components/MatchReport';
+import MultiMatchPlayerReport from './components/MultiMatchPlayerReport';
 
 const API_BASE = '/api';
 
@@ -214,13 +215,17 @@ export default function App() {
   const [loginError, setLoginError] = useState('');
 
   // Page state: 'home' | 'match_reports' | 'tournament_reports'
-  const [currentPage, setCurrentPage] = useState('home');
+  const [currentPage, setCurrentPage] = useState('match_reports');
 
   // Match Reports Form State
   const [competitions, setCompetitions] = useState([]);
   const [selectedCompId, setSelectedCompId] = useState('');
   const [matches, setMatches] = useState([]);
-  const [selectedMatchId, setSelectedMatchId] = useState('');
+  // One or more matches; one match keeps the single-match reports, several give multi-match Batter / Bowler reports
+  const [selectedMatchIds, setSelectedMatchIds] = useState([]);
+  const selectedMatchId = selectedMatchIds.length === 1 ? selectedMatchIds[0] : '';
+  const isMultiMatch = selectedMatchIds.length > 1;
+  const [multiMatchData, setMultiMatchData] = useState([]); // [{ details, balls }] for multi-match reports
 
   // Ball By Ball Data & Report State
   const [ballData, setBallData] = useState([]);
@@ -283,7 +288,7 @@ export default function App() {
 
   const handleLogout = () => {
     setIsLoggedIn(false);
-    setCurrentPage('home');
+    setCurrentPage('match_reports');
     resetMatchForm();
   };
 
@@ -299,7 +304,7 @@ export default function App() {
   // 2. COMPETITION SELECTION HANDLER
   const handleCompetitionChange = async (compId) => {
     setSelectedCompId(compId);
-    setSelectedMatchId('');
+    setSelectedMatchIds([]);
     setMatches([]);
     resetMatchForm();
 
@@ -313,14 +318,21 @@ export default function App() {
     }
   };
 
-  const handleMatchChange = (matchId) => {
-    setSelectedMatchId(matchId);
+  const toggleMatch = (matchId) => {
+    const id = String(matchId);
+    setSelectedMatchIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+    resetMatchForm();
+  };
+
+  const setAllMatches = (ids) => {
+    setSelectedMatchIds(ids.map(String));
     resetMatchForm();
   };
 
   const resetMatchForm = () => {
     setBallData([]);
     setMatchDetails(null);
+    setMultiMatchData([]);
     setIsDataFetched(false);
     setShowPreview(false);
     setSelectedTeamId('');
@@ -330,17 +342,21 @@ export default function App() {
 
   // 3. GENERATE REPORT BUTTON HANDLER (Fetch Ball by Ball Data & Match Details)
   const handleGenerateReport = async () => {
-    if (!selectedMatchId) return;
+    if (!selectedMatchIds.length) return;
     setLoading(true);
     try {
-      // Call Ball by Ball API
-      const bbbRes = await axios.get(`${API_BASE}/ballbyball/${selectedMatchId}`);
-      const rawData = bbbRes.data.data || [];
-      setBallData(rawData);
-
-      // Call Match Details API
-      const matchRes = await axios.get(`${API_BASE}/getMatchDetails/${selectedMatchId}`);
-      const mDetails = matchRes.data[0] || null;
+      // Ball by ball + match details for every selected match
+      const fetched = await Promise.all(selectedMatchIds.map(async (id) => {
+        const [bbbRes, matchRes] = await Promise.all([
+          axios.get(`${API_BASE}/ballbyball/${id}`),
+          axios.get(`${API_BASE}/getMatchDetails/${id}`)
+        ]);
+        return { details: matchRes.data[0] || null, balls: bbbRes.data.data || [] };
+      }));
+      const usable = fetched.filter((m) => m.details);
+      setMultiMatchData(usable);
+      setBallData(usable.flatMap((m) => m.balls));
+      const mDetails = usable[0]?.details || null;
       setMatchDetails(mDetails);
 
       // Pre-select Team A if available
@@ -1756,7 +1772,7 @@ export default function App() {
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
       {/* Header Bar */}
       <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-50 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setCurrentPage('home')}>
+        <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setCurrentPage('match_reports')}>
           <div className="p-2 bg-blue-600 rounded-lg shadow-lg shadow-blue-500/30">
             <Trophy className="w-6 h-6 text-white" />
           </div>
@@ -1764,7 +1780,7 @@ export default function App() {
             <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent">
               Cricket Report Studio
             </h1>
-            <p className="text-xs text-slate-400">Match & Tournament Analytics Engine</p>
+            <p className="text-xs text-slate-400">Match Analytics Engine</p>
           </div>
         </div>
 
@@ -1780,81 +1796,11 @@ export default function App() {
       </header>
 
       {/* ------------------------------------------------------------- */}
-      {/* VIEW 2: HOMEPAGE */}
-      {/* ------------------------------------------------------------- */}
-      {currentPage === 'home' && (
-        <main className="flex-1 p-8 max-w-5xl mx-auto w-full flex flex-col justify-center">
-          <div className="text-center space-y-3 mb-10">
-            <h2 className="text-3xl font-bold text-white">Select Report Category</h2>
-            <p className="text-slate-400 text-sm max-w-md mx-auto">
-              Choose between single match analysis or comprehensive tournament breakdown reports.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-            <div
-              onClick={() => setCurrentPage('match_reports')}
-              className="group cursor-pointer bg-slate-900 border border-slate-800 hover:border-blue-500/80 rounded-2xl p-8 shadow-xl transition-all hover:shadow-2xl hover:shadow-blue-500/10 flex flex-col justify-between relative overflow-hidden"
-            >
-              <div className="absolute top-0 right-0 w-32 h-32 bg-blue-600/10 rounded-full blur-2xl group-hover:bg-blue-600/20 transition-all" />
-
-              <div>
-                <div className="w-12 h-12 rounded-xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400 mb-6">
-                  <FileText className="w-6 h-6" />
-                </div>
-                <h3 className="text-2xl font-bold text-white group-hover:text-blue-400 transition-colors">
-                  Match Reports
-                </h3>
-                <p className="text-sm text-slate-400 mt-2 leading-relaxed">
-                  Generate detailed ball-by-ball analysis, player scorecards, and client profile HTML/PDF/PPTX reports.
-                </p>
-              </div>
-
-              <div className="mt-8 flex items-center text-sm font-semibold text-blue-400 group-hover:translate-x-1 transition-transform">
-                <span>Configure Match Report</span>
-                <ChevronRight className="w-4 h-4 ml-1" />
-              </div>
-            </div>
-
-            <div
-              onClick={() => setCurrentPage('tournament_reports')}
-              className="group cursor-pointer bg-slate-900 border border-slate-800 hover:border-amber-500/80 rounded-2xl p-8 shadow-xl transition-all hover:shadow-2xl hover:shadow-amber-500/10 flex flex-col justify-between relative overflow-hidden opacity-90"
-            >
-              <div className="absolute top-0 right-0 w-32 h-32 bg-amber-600/10 rounded-full blur-2xl group-hover:bg-amber-600/20 transition-all" />
-
-              <div>
-                <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 mb-6">
-                  <Layers className="w-6 h-6" />
-                </div>
-                <h3 className="text-2xl font-bold text-white group-hover:text-amber-400 transition-colors">
-                  Tournament Reports
-                </h3>
-                <p className="text-sm text-slate-400 mt-2 leading-relaxed">
-                  Consolidated series performance, team standings, player leaderboard aggregations, and tournament summary.
-                </p>
-              </div>
-
-              <div className="mt-8 flex items-center text-sm font-semibold text-amber-400 group-hover:translate-x-1 transition-transform">
-                <span>Explore Tournament Reports</span>
-                <ChevronRight className="w-4 h-4 ml-1" />
-              </div>
-            </div>
-          </div>
-        </main>
-      )}
-
-      {/* ------------------------------------------------------------- */}
       {/* VIEW 3: MATCH REPORTS CONFIGURATION & PREVIEW */}
       {/* ------------------------------------------------------------- */}
       {currentPage === 'match_reports' && (
         <main className="flex-1 p-6 max-w-6xl mx-auto w-full space-y-6">
-          <div className="flex items-center justify-between">
-            <button
-              onClick={() => setCurrentPage('home')}
-              className="flex items-center text-sm text-slate-400 hover:text-white transition-colors"
-            >
-              <ArrowLeft className="w-4 h-4 mr-1.5" /> Back to Categories
-            </button>
+          <div className="flex items-center justify-end">
             <span className="text-xs bg-blue-500/10 border border-blue-500/30 text-blue-400 font-semibold px-3 py-1 rounded-full">
               Match Report Studio
             </span>
@@ -1864,7 +1810,7 @@ export default function App() {
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
             <h2 className="text-lg font-bold text-white">1. Select Competition & Match</h2>
 
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {/* Competition Dropdown */}
               <div>
                 <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
@@ -1884,40 +1830,42 @@ export default function App() {
                 </select>
               </div>
 
-              {/* Match Dropdown */}
+              {/* Match multi-select */}
               <div>
                 <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                  Match
+                  Matches
                 </label>
-                <select
-                  disabled={!selectedCompId}
-                  value={selectedMatchId}
-                  onChange={(e) => handleMatchChange(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-2.5 text-sm text-slate-100 focus:outline-none disabled:opacity-40"
-                >
-                  <option value="">-- Choose Match --</option>
-                  {matches.map((m) => (
-                    <option key={m.ID} value={m.ID}>
-                      {m.MatchNameDate || m.MatchNameShort || m.MatchName}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Client Template Profile */}
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                  Client Profile
-                </label>
-                <select
-                  value={selectedTemplateId}
-                  onChange={(e) => setSelectedTemplateId(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-2.5 text-sm text-slate-100 focus:outline-none"
-                >
-                  <option value="vca">Vidarbha (VCA)</option>
-                  <option value="bcci">BCCI Profile</option>
-                  <option value="icc">ICC Default</option>
-                </select>
+                <details className="relative group">
+                  <summary
+                    className={`list-none w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-sm text-slate-100 cursor-pointer flex items-center justify-between ${!selectedCompId ? 'opacity-40 pointer-events-none' : ''}`}
+                  >
+                    <span className="truncate">
+                      {selectedMatchIds.length === 0
+                        ? '-- Choose Matches --'
+                        : selectedMatchIds.length === 1
+                          ? (matches.find((m) => String(m.ID) === selectedMatchIds[0])?.MatchNameDate || '1 match selected')
+                          : `${selectedMatchIds.length} matches selected`}
+                    </span>
+                    <ChevronRight className="w-4 h-4 text-slate-400 rotate-90 shrink-0" />
+                  </summary>
+                  <div className="absolute z-40 mt-1 w-full max-h-72 overflow-y-auto bg-slate-950 border border-slate-700 rounded-lg shadow-2xl p-2 space-y-1">
+                    <div className="flex items-center justify-between px-2 pb-2 border-b border-slate-800 text-xs">
+                      <button type="button" onClick={() => setAllMatches(matches.map((m) => m.ID))} className="text-blue-400 hover:text-blue-300 font-semibold">Select all</button>
+                      <button type="button" onClick={() => setAllMatches([])} className="text-slate-400 hover:text-white font-semibold">Clear</button>
+                    </div>
+                    {matches.map((m) => (
+                      <label key={m.ID} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-slate-800 cursor-pointer text-sm text-slate-200">
+                        <input
+                          type="checkbox"
+                          className="accent-blue-500"
+                          checked={selectedMatchIds.includes(String(m.ID))}
+                          onChange={() => toggleMatch(m.ID)}
+                        />
+                        <span className="truncate">{m.MatchNameDate || m.MatchNameShort || m.MatchName}</span>
+                      </label>
+                    ))}
+                  </div>
+                </details>
               </div>
 
               {/* Report Type */}
@@ -1942,13 +1890,13 @@ export default function App() {
               <div className="text-xs text-slate-400">
                 {isDataFetched && (
                   <span className="text-emerald-400 flex items-center gap-1 font-medium">
-                    <CheckCircle2 className="w-4 h-4" /> Loaded {ballData.length} deliveries for match #{selectedMatchId}
+                    <CheckCircle2 className="w-4 h-4" /> Loaded {ballData.length} deliveries {isMultiMatch ? `from ${multiMatchData.length} matches` : `for match #${selectedMatchId}`}
                   </span>
                 )}
               </div>
 
               <button
-                disabled={!selectedMatchId || loading}
+                disabled={!selectedMatchIds.length || loading}
                 onClick={handleGenerateReport}
                 className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white font-semibold px-6 py-2.5 rounded-lg shadow-lg shadow-blue-500/20 text-sm transition-all flex items-center space-x-2"
               >
@@ -2025,7 +1973,7 @@ export default function App() {
           )}
 
           {/* Action Bar & Export Options */}
-          {isDataFetched && selectedReportType !== 'vca-postmatch' && (
+          {isDataFetched && !isMultiMatch && selectedReportType !== 'vca-postmatch' && (
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col md:flex-row items-center justify-between gap-4">
               <div>
                 <h3 className="text-base font-bold text-white">Report Preview Ready</h3>
@@ -2066,7 +2014,21 @@ export default function App() {
 
           {/* HTML REPORT PREVIEW CONTAINER */}
           {showPreview && isDataFetched && (
-            selectedReportType === 'vca-postmatch' ? (
+            isMultiMatch ? (
+              selectedReportType === 'vca-postmatch' ? (
+                <div className="bg-slate-900 border border-amber-500/40 rounded-2xl p-6 text-sm text-amber-300">
+                  The Post Match Report covers one match. Tick a single match, or switch to the Batter / Bowler report for a multi-match report.
+                </div>
+              ) : (
+                <MultiMatchPlayerReport
+                  key={`${selectedReportType}-${selectedReportType === 'vca-bowler' ? selectedBowlerId : selectedBatterId}`}
+                  matchesData={multiMatchData}
+                  role={selectedReportType === 'vca-bowler' ? 'bowler' : 'batter'}
+                  playerId={selectedReportType === 'vca-bowler' ? selectedBowlerId : selectedBatterId}
+                  teamName={availableTeams.find((t) => String(t.id) === String(selectedTeamId))?.name || ''}
+                />
+              )
+            ) : selectedReportType === 'vca-postmatch' ? (
               <MatchReport
                 key={selectedMatchId}
                 ballData={ballData}
@@ -3578,35 +3540,6 @@ export default function App() {
       </main>
       )}
 
-      {/* ------------------------------------------------------------- */}
-      {/* VIEW 4: TOURNAMENT REPORTS */}
-      {/* ------------------------------------------------------------- */}
-      {currentPage === 'tournament_reports' && (
-        <main className="flex-1 p-6 max-w-4xl mx-auto w-full space-y-6 flex flex-col justify-center">
-          <button
-            onClick={() => setCurrentPage('home')}
-            className="flex items-center text-sm text-slate-400 hover:text-white transition-colors"
-          >
-            <ArrowLeft className="w-4 h-4 mr-1.5" /> Back to Categories
-          </button>
-
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-12 text-center shadow-xl space-y-4">
-            <div className="w-16 h-16 bg-amber-500/10 border border-amber-500/30 rounded-2xl flex items-center justify-center text-amber-400 mx-auto">
-              <Layers className="w-8 h-8" />
-            </div>
-            <h2 className="text-2xl font-bold text-white">Tournament Reports Studio</h2>
-            <p className="text-slate-400 text-sm max-w-md mx-auto">
-              Tournament analytics & series leaderboards are ready for aggregation. Select your competition above to build match-level reports!
-            </p>
-            <button
-              onClick={() => setCurrentPage('match_reports')}
-              className="bg-amber-600 hover:bg-amber-500 text-white font-semibold px-6 py-2.5 rounded-lg shadow-lg shadow-amber-500/20 text-sm transition-all"
-            >
-              Go to Match Reports Studio
-            </button>
-          </div>
-        </main>
-      )}
     </div>
   );
 }
