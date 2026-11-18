@@ -192811,7 +192811,7 @@ end`);
 // src/main.js
 var import_express = __toESM(require_express2(), 1);
 var import_cors = __toESM(require_lib3(), 1);
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, dialog } from "electron";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
@@ -192836,40 +192836,35 @@ var clientTemplates = {
     fontFamily: "Helvetica",
     logoText: "VCA CRICKET ANALYTICS",
     footerNotice: "Confidential - Vidarbha Cricket Association Match Analysis"
-  },
-  bcci: {
-    id: "bcci",
-    name: "BCCI Pro Analytics",
-    primaryColor: "#0284C7",
-    // Sky Blue
-    secondaryColor: "#EA580C",
-    // Orange
-    accentColor: "#15803D",
-    // Green
-    textColor: "#1E293B",
-    headerBg: "#0284C7",
-    headerText: "#FFFFFF",
-    cardBg: "#F8FAFC",
-    fontFamily: "Helvetica",
-    logoText: "BCCI PERFORMANCE REPORTS",
-    footerNotice: "Property of BCCI Technical Committee"
-  },
-  standard: {
-    id: "standard",
-    name: "Standard Match Report",
-    primaryColor: "#374151",
-    // Dark Slate
-    secondaryColor: "#2563EB",
-    // Blue
-    accentColor: "#D97706",
-    textColor: "#1F2937",
-    headerBg: "#1F2937",
-    headerText: "#FFFFFF",
-    cardBg: "#F9FAFB",
-    fontFamily: "Helvetica",
-    logoText: "CRICKET MATCH REPORT",
-    footerNotice: "Generated via CricketReportApp Engine"
   }
+  // bcci: {
+  //   id: 'bcci',
+  //   name: 'BCCI Pro Analytics',
+  //   primaryColor: '#0284C7', // Sky Blue
+  //   secondaryColor: '#EA580C', // Orange
+  //   accentColor: '#15803D', // Green
+  //   textColor: '#1E293B',
+  //   headerBg: '#0284C7',
+  //   headerText: '#FFFFFF',
+  //   cardBg: '#F8FAFC',
+  //   fontFamily: 'Helvetica',
+  //   logoText: 'BCCI PERFORMANCE REPORTS',
+  //   footerNotice: 'Property of BCCI Technical Committee'
+  // },
+  // standard: {
+  //   id: 'standard',
+  //   name: 'Standard Match Report',
+  //   primaryColor: '#374151', // Dark Slate
+  //   secondaryColor: '#2563EB', // Blue
+  //   accentColor: '#D97706',
+  //   textColor: '#1F2937',
+  //   headerBg: '#1F2937',
+  //   headerText: '#FFFFFF',
+  //   cardBg: '#F9FAFB',
+  //   fontFamily: 'Helvetica',
+  //   logoText: 'CRICKET MATCH REPORT',
+  //   footerNotice: 'Generated via CricketReportApp Engine'
+  // }
 };
 
 // ../../node_modules/.pnpm/pptxgenjs@4.0.1/node_modules/pptxgenjs/dist/pptxgen.es.js
@@ -198424,6 +198419,70 @@ expressApp.get("/api/health", (req, res) => {
     res.json({ status: 200, dbPath: currentDbPath, competitionsCount: count ? count.c : 0 });
   } catch (err) {
     res.status(500).json({ status: 500, error: err.message, dbPath: currentDbPath });
+  }
+});
+expressApp.get("/api/status", (req, res) => {
+  try {
+    getDatabaseConnection();
+    res.json({
+      status: "online",
+      dbPath: currentDbPath,
+      dbConnected: !!dbInstance
+    });
+  } catch (err) {
+    res.json({
+      status: "error",
+      dbPath: currentDbPath,
+      dbConnected: false,
+      error: err.message
+    });
+  }
+});
+expressApp.post("/api/config/db-path", (req, res) => {
+  try {
+    const { newDbPath } = req.body;
+    if (!newDbPath) {
+      return res.status(400).json({ error: "Database path cannot be empty" });
+    }
+    const trimmedPath = newDbPath.trim();
+    if (!fs.existsSync(trimmedPath)) {
+      return res.status(404).json({ error: "Database file not found at specified path" });
+    }
+    if (dbInstance) {
+      try {
+        dbInstance.close();
+      } catch (closeErr) {
+        console.warn("Error closing prior db instance:", closeErr);
+      }
+      dbInstance = null;
+    }
+    process.env.CRICKET_DB_PATH = trimmedPath;
+    getDatabaseConnection();
+    res.json({ success: true, dbPath: currentDbPath });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+expressApp.post("/api/config/select-file", async (req, res) => {
+  try {
+    const focusedWin = BrowserWindow.getFocusedWindow() || mainWindow;
+    const dialogOptions = {
+      title: "Select Cricket SQLite Database File",
+      properties: ["openFile"],
+      filters: [
+        { name: "All Files", extensions: ["*"] },
+        { name: "SQLite Database", extensions: ["db", "sqlite", "sqlite3"] }
+      ]
+    };
+    const result = focusedWin ? await dialog.showOpenDialog(focusedWin, dialogOptions) : await dialog.showOpenDialog(dialogOptions);
+    if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      return res.json({ cancelled: true });
+    }
+    const cleanPath = result.filePaths[0].replace(/\\/g, "/");
+    return res.json({ cancelled: false, filePath: cleanPath });
+  } catch (err) {
+    console.error("Error opening file dialog in Electron:", err);
+    res.status(500).json({ error: "Failed to launch file dialog: " + err.message });
   }
 });
 expressApp.post("/api/login/validate/:username/:password", (req, res) => {

@@ -3,9 +3,10 @@ import axios from 'axios';
 import * as htmlToImage from 'html-to-image';
 import pptxgen from 'pptxgenjs';
 import { jsPDF } from 'jspdf';
-import { Download, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Download, ChevronLeft, ChevronRight, Printer, Loader2 } from 'lucide-react';
 import { buildMatchModel } from './match-report/matchStats';
 import { buildSlides, SlideView, SLIDE_W, SLIDE_H, GRAPHIC_KINDS } from './match-report/slides';
+import { printPdfDocument } from '../utils/printPdf';
 
 const GRAPHICS_BASE = 'https://cloud.cricket-21.com/GraphicsApi/api';
 const PX_PER_INCH = SLIDE_W / 10; // slides are 900x525px = 10 x 5.83in (custom layout below)
@@ -232,7 +233,8 @@ export default function MatchReport({ ballData, matchDetails }) {
         pptx.defineLayout({ name: 'C21_MATCH_REPORT', width: SLIDE_W / PX_PER_INCH, height: SLIDE_H / PX_PER_INCH });
         pptx.layout = 'C21_MATCH_REPORT';
       }
-      const pdf = format === 'pdf' ? new jsPDF({ orientation: 'landscape', unit: 'px', format: [SLIDE_W, SLIDE_H] }) : null;
+      const isPdfMode = format === 'pdf' || format === 'print';
+      const pdf = isPdfMode ? new jsPDF({ orientation: 'landscape', unit: 'px', format: [SLIDE_W, SLIDE_H] }) : null;
 
       for (let i = 0; i < slides.length; i += 1) {
         await ensureGraphics(slides[i].graphics);
@@ -253,7 +255,13 @@ export default function MatchReport({ ballData, matchDetails }) {
         setExporting({ format, done: i + 1, total: slides.length });
       }
 
-      if (pdf) pdf.save(`${fileName}.pdf`);
+      if (pdf) {
+        if (format === 'print') {
+          printPdfDocument(pdf);
+        } else {
+          pdf.save(`${fileName}.pdf`);
+        }
+      }
       if (pptx) await pptx.writeFile({ fileName: `${fileName}.pptx` });
     } catch (err) {
       console.error('Match Report Export Error:', err);
@@ -301,16 +309,37 @@ export default function MatchReport({ ballData, matchDetails }) {
             onClick={() => handleDownload('pdf')}
             className="flex items-center space-x-2 bg-rose-600 hover:bg-rose-500 text-white font-medium px-4 py-2 rounded-lg shadow-md text-xs transition-all disabled:opacity-50"
           >
-            <Download className="w-4 h-4" />
-            <span>Download PDF</span>
+            {exporting?.format === 'pdf' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            <span>{exporting?.format === 'pdf' ? 'Preparing PDF...' : 'Download PDF'}</span>
+          </button>
+          <button
+            disabled={!!exporting}
+            onClick={() => handleDownload('print')}
+            title="Print PDF report directly to printer"
+            className="flex items-center space-x-2 bg-emerald-600 hover:bg-emerald-500 text-white font-medium px-4 py-2 rounded-lg shadow-md text-xs transition-all disabled:opacity-50"
+          >
+            {exporting?.format === 'print' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Printer className="w-4 h-4" />
+            )}
+            <span>{exporting?.format === 'print' ? 'Opening Print...' : 'Print PDF'}</span>
           </button>
           <button
             disabled={!!exporting}
             onClick={() => handleDownload('pptx')}
             className="flex items-center space-x-2 bg-amber-600 hover:bg-amber-500 text-white font-medium px-4 py-2 rounded-lg shadow-md text-xs transition-all disabled:opacity-50"
           >
-            <Download className="w-4 h-4" />
-            <span>Download PPTX</span>
+            {exporting?.format === 'pptx' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            <span>{exporting?.format === 'pptx' ? 'Preparing PPTX...' : 'Download PPTX'}</span>
           </button>
         </div>
       </div>

@@ -3,7 +3,8 @@ import axios from 'axios';
 import * as htmlToImage from 'html-to-image';
 import pptxgen from 'pptxgenjs';
 import { jsPDF } from 'jspdf';
-import { Download } from 'lucide-react';
+import { Download, Printer, Loader2 } from 'lucide-react';
+import { printPdfDocument } from '../utils/printPdf';
 
 const renderInningBarChart = (rows) => {
   if (!rows || rows.length === 0) return <div className="text-xs text-slate-500 text-center py-20">No inning bowling data available</div>;
@@ -631,6 +632,7 @@ export default function BowlerReport({
 }) {
   const [previewSlide, setPreviewSlide] = useState(1);
   const [downloading, setDownloading] = useState(false);
+  const [actionFormat, setActionFormat] = useState(null);
   const [graphicsData, setGraphicsData] = useState({
     pitchmapSvg: '',
     wwregionSvg: '',
@@ -886,58 +888,83 @@ export default function BowlerReport({
 
     const GRAPHICS_BASE = 'https://cloud.cricket-21.com/GraphicsApi/api';
 
+    const fetchGfxForBalls = async (balls) => {
+      if (!balls || balls.length === 0) return { pitchSvg: '', wwSvg: '' };
+      const validBalls = balls.filter(b => b.Bowlballs === 1 || b.Bowlballs === true || b.BowlBalls === 1);
+      if (validBalls.length === 0) return { pitchSvg: '', wwSvg: '' };
+      const mappedBalls = validBalls.map(mapBallToPayload);
+
+      const pitchPayload = {
+        title: "pitchmap",
+        type: "svg",
+        scale: 50,
+        view: "1",
+        region: 8,
+        template: 2,
+        clientid: 1,
+        isHawk: 0,
+        balls: mappedBalls
+      };
+      const wwPayload = {
+        title: "WW Region",
+        type: "svg",
+        scale: 50,
+        view: "1",
+        region: 8,
+        template: 2,
+        clientid: 1,
+        isHawk: 0,
+        balls: mappedBalls
+      };
+
+      const [pitchRes, wwRes] = await Promise.all([
+        axios.post(`${GRAPHICS_BASE}/pitchmap`, pitchPayload, { headers: { 'Content-Type': 'application/json' } }).catch(() => null),
+        axios.post(`${GRAPHICS_BASE}/wwregion`, wwPayload, { headers: { 'Content-Type': 'application/json' } }).catch(() => null)
+      ]);
+
+      let pitchSvg = '';
+      if (typeof pitchRes?.data === 'string') pitchSvg = pitchRes.data;
+      else if (pitchRes?.data?.svg) pitchSvg = pitchRes.data.svg;
+      else if (pitchRes?.data?.data) pitchSvg = pitchRes.data.data;
+
+      let wwSvg = '';
+      if (typeof wwRes?.data === 'string') wwSvg = wwRes.data;
+      else if (wwRes?.data?.svg) wwSvg = wwRes.data.svg;
+      else if (wwRes?.data?.data) wwSvg = wwRes.data.data;
+
+      if (typeof pitchSvg === 'string' && pitchSvg.startsWith('"') && pitchSvg.endsWith('"')) {
+        try { pitchSvg = JSON.parse(pitchSvg); } catch (e) { }
+      }
+      if (typeof wwSvg === 'string' && wwSvg.startsWith('"') && wwSvg.endsWith('"')) {
+        try { wwSvg = JSON.parse(wwSvg); } catch (e) { }
+      }
+
+      return { pitchSvg, wwSvg };
+    };
+
     bowlerPhaseStats.phases.forEach(async (p) => {
       try {
-        const validBallsInPhase = p.ballsInPhase.filter(b => b.Bowlballs === 1 || b.Bowlballs === true || b.BowlBalls === 1);
-        const mappedBalls = validBallsInPhase.map(mapBallToPayload);
-        const pitchPayload = {
-          title: "pitchmap",
-          type: "svg",
-          scale: 50,
-          view: "1",
-          region: 8,
-          template: 2,
-          clientid: 1,
-          isHawk: 0,
-          balls: mappedBalls
-        };
-        const wwPayload = {
-          title: "WW Region",
-          type: "svg",
-          scale: 50,
-          view: "1",
-          region: 8,
-          template: 2,
-          clientid: 1,
-          isHawk: 0,
-          balls: mappedBalls
-        };
+        const rhbBalls = p.ballsInPhase.filter(b => {
+          const batType = Number(b.StBattingTypeID !== undefined && b.StBattingTypeID !== null ? b.StBattingTypeID : (b.BatTypeID !== undefined ? b.BatTypeID : 1));
+          return batType !== 2;
+        });
 
-        const [pitchRes, wwRes] = await Promise.all([
-          axios.post(`${GRAPHICS_BASE}/pitchmap`, pitchPayload, { headers: { 'Content-Type': 'application/json' } }).catch(() => null),
-          axios.post(`${GRAPHICS_BASE}/wwregion`, wwPayload, { headers: { 'Content-Type': 'application/json' } }).catch(() => null)
+        const lhbBalls = p.ballsInPhase.filter(b => {
+          const batType = Number(b.StBattingTypeID !== undefined && b.StBattingTypeID !== null ? b.StBattingTypeID : (b.BatTypeID !== undefined ? b.BatTypeID : 1));
+          return batType === 2;
+        });
+
+        const [overallGfx, rhbGfx, lhbGfx] = await Promise.all([
+          fetchGfxForBalls(p.ballsInPhase),
+          fetchGfxForBalls(rhbBalls),
+          fetchGfxForBalls(lhbBalls)
         ]);
-
-        let pitchSvg = '';
-        if (typeof pitchRes?.data === 'string') pitchSvg = pitchRes.data;
-        else if (pitchRes?.data?.svg) pitchSvg = pitchRes.data.svg;
-        else if (pitchRes?.data?.data) pitchSvg = pitchRes.data.data;
-
-        let wwSvg = '';
-        if (typeof wwRes?.data === 'string') wwSvg = wwRes.data;
-        else if (wwRes?.data?.svg) wwSvg = wwRes.data.svg;
-        else if (wwRes?.data?.data) wwSvg = wwRes.data.data;
-
-        if (typeof pitchSvg === 'string' && pitchSvg.startsWith('"') && pitchSvg.endsWith('"')) {
-          try { pitchSvg = JSON.parse(pitchSvg); } catch (e) { }
-        }
-        if (typeof wwSvg === 'string' && wwSvg.startsWith('"') && wwSvg.endsWith('"')) {
-          try { wwSvg = JSON.parse(wwSvg); } catch (e) { }
-        }
 
         setPhaseGraphicsMap(prev => ({
           ...prev,
-          [p.phaseName]: { pitchSvg, wwSvg }
+          [p.phaseName]: overallGfx,
+          [`${p.phaseName}_RHB`]: rhbGfx,
+          [`${p.phaseName}_LHB`]: lhbGfx
         }));
       } catch (err) {
         console.error(`Error fetching phase graphics for ${p.phaseName}:`, err);
@@ -1401,6 +1428,7 @@ export default function BowlerReport({
   // Handle PDF & PPTX Download for Bowler Report
   const handleDownload = async (format) => {
     setDownloading(true);
+    setActionFormat(format);
     try {
       if (format === 'pptx') {
         const pptx = typeof pptxgen === 'function' ? new pptxgen() : new pptxgen.default();
@@ -1711,7 +1739,7 @@ export default function BowlerReport({
             fontSize: 9, fontFace: 'Arial', border: { pt: '1', color: 'CBD5E1' }, fill: 'FFFFFF'
           });
 
-          // Phase Graphics Slide
+          // Phase Graphics Slide: Overall
           const sPhaseGraphics = pptx.addSlide();
           sPhaseGraphics.background = { color: 'F6F4EB' };
           sPhaseGraphics.addShape(pptx.shapes.RECTANGLE, {
@@ -1721,7 +1749,7 @@ export default function BowlerReport({
             x: 0.6, y: 0.5, w: 9.0, h: 0.6,
             fontSize: 24, bold: true, color: '0F172A', fontFace: 'Arial'
           });
-          sPhaseGraphics.addText(`■  PHASE WISE - ( ${p.phaseName} )`, {
+          sPhaseGraphics.addText(`■  PHASE WISE - ( ${p.phaseName} ) - OVERALL`, {
             x: 0.6, y: 1.2, w: 9.0, h: 0.4,
             fontSize: 14, bold: true, color: '1E293B', fontFace: 'Arial'
           });
@@ -1739,6 +1767,70 @@ export default function BowlerReport({
           if (pG?.pitchSvg) {
             sPhaseGraphics.addImage({
               data: `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(pG.pitchSvg)))}`,
+              x: 5.1, y: 1.9, w: 4.1, h: 3.0
+            });
+          }
+
+          // Phase Graphics Slide: vs RHB
+          const sPhaseGraphicsRHB = pptx.addSlide();
+          sPhaseGraphicsRHB.background = { color: 'F6F4EB' };
+          sPhaseGraphicsRHB.addShape(pptx.shapes.RECTANGLE, {
+            x: 0, y: 0, w: 0.25, h: '100%', fill: { color: '0F172A' }, line: { color: '0F172A' }
+          });
+          sPhaseGraphicsRHB.addText(matchTitle.toUpperCase(), {
+            x: 0.6, y: 0.5, w: 9.0, h: 0.6,
+            fontSize: 24, bold: true, color: '0F172A', fontFace: 'Arial'
+          });
+          sPhaseGraphicsRHB.addText(`■  PHASE WISE - ( ${p.phaseName} ) - VS RHB`, {
+            x: 0.6, y: 1.2, w: 9.0, h: 0.4,
+            fontSize: 14, bold: true, color: '1E293B', fontFace: 'Arial'
+          });
+          sPhaseGraphicsRHB.addShape(pptx.shapes.RECTANGLE, {
+            x: 0.6, y: 1.7, w: 8.8, h: 3.4, fill: { color: '0F172A' }, line: { color: '0F172A' }
+          });
+
+          const pGRHB = phaseGraphicsMap[`${p.phaseName}_RHB`];
+          if (pGRHB?.wwSvg) {
+            sPhaseGraphicsRHB.addImage({
+              data: `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(pGRHB.wwSvg)))}`,
+              x: 0.8, y: 1.9, w: 4.1, h: 3.0
+            });
+          }
+          if (pGRHB?.pitchSvg) {
+            sPhaseGraphicsRHB.addImage({
+              data: `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(pGRHB.pitchSvg)))}`,
+              x: 5.1, y: 1.9, w: 4.1, h: 3.0
+            });
+          }
+
+          // Phase Graphics Slide: vs LHB
+          const sPhaseGraphicsLHB = pptx.addSlide();
+          sPhaseGraphicsLHB.background = { color: 'F6F4EB' };
+          sPhaseGraphicsLHB.addShape(pptx.shapes.RECTANGLE, {
+            x: 0, y: 0, w: 0.25, h: '100%', fill: { color: '0F172A' }, line: { color: '0F172A' }
+          });
+          sPhaseGraphicsLHB.addText(matchTitle.toUpperCase(), {
+            x: 0.6, y: 0.5, w: 9.0, h: 0.6,
+            fontSize: 24, bold: true, color: '0F172A', fontFace: 'Arial'
+          });
+          sPhaseGraphicsLHB.addText(`■  PHASE WISE - ( ${p.phaseName} ) - VS LHB`, {
+            x: 0.6, y: 1.2, w: 9.0, h: 0.4,
+            fontSize: 14, bold: true, color: '1E293B', fontFace: 'Arial'
+          });
+          sPhaseGraphicsLHB.addShape(pptx.shapes.RECTANGLE, {
+            x: 0.6, y: 1.7, w: 8.8, h: 3.4, fill: { color: '0F172A' }, line: { color: '0F172A' }
+          });
+
+          const pGLHB = phaseGraphicsMap[`${p.phaseName}_LHB`];
+          if (pGLHB?.wwSvg) {
+            sPhaseGraphicsLHB.addImage({
+              data: `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(pGLHB.wwSvg)))}`,
+              x: 0.8, y: 1.9, w: 4.1, h: 3.0
+            });
+          }
+          if (pGLHB?.pitchSvg) {
+            sPhaseGraphicsLHB.addImage({
+              data: `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(pGLHB.pitchSvg)))}`,
               x: 5.1, y: 1.9, w: 4.1, h: 3.0
             });
           }
@@ -2112,8 +2204,12 @@ export default function BowlerReport({
         for (let pIdx = 0; pIdx < bowlerPhaseStats.phases.length; pIdx++) {
           const statsEl = document.getElementById(`bowler-phase-stats-${pIdx}-node`);
           const graphicsEl = document.getElementById(`bowler-phase-graphics-${pIdx}-node`);
+          const graphicsRHBEl = document.getElementById(`bowler-phase-graphics-${pIdx}-rhb-node`);
+          const graphicsLHBEl = document.getElementById(`bowler-phase-graphics-${pIdx}-lhb-node`);
           await addSlideToPdf(statsEl);
           await addSlideToPdf(graphicsEl);
+          await addSlideToPdf(graphicsRHBEl);
+          await addSlideToPdf(graphicsLHBEl);
         }
 
         const orderWiseEl = document.getElementById('bowler-order-wise-node');
@@ -2129,18 +2225,23 @@ export default function BowlerReport({
           await addSlideToPdf(boundaryGraphicalEl);
         }
 
-        pdf.save(`BowlerReport_${safeName}.pdf`);
+        if (format === 'print') {
+          printPdfDocument(pdf);
+        } else {
+          pdf.save(`BowlerReport_${safeName}.pdf`);
+        }
       }
     } catch (err) {
       console.error('Bowler Report Export Error:', err);
     } finally {
       setDownloading(false);
+      setActionFormat(null);
     }
   };
 
-  const orderWiseSlideNum = 6 + (bowlerPhaseStats.phases.length * 2);
-  const orderTypeGraphicalSlideNum = 7 + (bowlerPhaseStats.phases.length * 2);
-  const boundaryRatioBaseSlideNum = 8 + (bowlerPhaseStats.phases.length * 2);
+  const orderWiseSlideNum = 6 + (bowlerPhaseStats.phases.length * 4);
+  const orderTypeGraphicalSlideNum = 7 + (bowlerPhaseStats.phases.length * 4);
+  const boundaryRatioBaseSlideNum = 8 + (bowlerPhaseStats.phases.length * 4);
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl space-y-6 animate-fadeIn">
@@ -2161,16 +2262,37 @@ export default function BowlerReport({
             onClick={() => handleDownload('pdf')}
             className="flex items-center space-x-2 bg-rose-600 hover:bg-rose-500 text-white font-medium px-4 py-2 rounded-lg shadow-md text-xs transition-all disabled:opacity-50"
           >
-            <Download className="w-4 h-4" />
-            <span>Download PDF</span>
+            {downloading && actionFormat === 'pdf' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            <span>{downloading && actionFormat === 'pdf' ? 'Preparing PDF...' : 'Download PDF'}</span>
+          </button>
+          <button
+            disabled={downloading}
+            onClick={() => handleDownload('print')}
+            title="Print PDF report directly to printer"
+            className="flex items-center space-x-2 bg-emerald-600 hover:bg-emerald-500 text-white font-medium px-4 py-2 rounded-lg shadow-md text-xs transition-all disabled:opacity-50"
+          >
+            {downloading && actionFormat === 'print' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Printer className="w-4 h-4" />
+            )}
+            <span>{downloading && actionFormat === 'print' ? 'Opening Print...' : 'Print PDF'}</span>
           </button>
           <button
             disabled={downloading}
             onClick={() => handleDownload('pptx')}
             className="flex items-center space-x-2 bg-amber-600 hover:bg-amber-500 text-white font-medium px-4 py-2 rounded-lg shadow-md text-xs transition-all disabled:opacity-50"
           >
-            <Download className="w-4 h-4" />
-            <span>Download PPTX</span>
+            {downloading && actionFormat === 'pptx' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            <span>{downloading && actionFormat === 'pptx' ? 'Preparing PPTX...' : 'Download PPTX'}</span>
           </button>
         </div>
       </div>
@@ -2230,8 +2352,10 @@ export default function BowlerReport({
           </button>
 
           {bowlerPhaseStats.phases.map((p, pIdx) => {
-            const statsSlideNum = 6 + (pIdx * 2);
-            const graphicsSlideNum = 6 + (pIdx * 2) + 1;
+            const statsSlideNum = 6 + (pIdx * 4);
+            const graphicsSlideNum = 6 + (pIdx * 4) + 1;
+            const graphicsRHBSlideNum = 6 + (pIdx * 4) + 2;
+            const graphicsLHBSlideNum = 6 + (pIdx * 4) + 3;
             return (
               <React.Fragment key={pIdx}>
                 <button
@@ -2252,7 +2376,27 @@ export default function BowlerReport({
                       : 'bg-slate-800 text-slate-400 hover:text-white'
                   }`}
                 >
-                  Slide {graphicsSlideNum}: Phase {p.phaseName} (Graphics)
+                  Slide {graphicsSlideNum}: Phase {p.phaseName} (Overall)
+                </button>
+                <button
+                  onClick={() => setPreviewSlide(graphicsRHBSlideNum)}
+                  className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${
+                    previewSlide === graphicsRHBSlideNum
+                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
+                      : 'bg-slate-800 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Slide {graphicsRHBSlideNum}: Phase {p.phaseName} (vs RHB)
+                </button>
+                <button
+                  onClick={() => setPreviewSlide(graphicsLHBSlideNum)}
+                  className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${
+                    previewSlide === graphicsLHBSlideNum
+                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
+                      : 'bg-slate-800 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Slide {graphicsLHBSlideNum}: Phase {p.phaseName} (vs LHB)
                 </button>
               </React.Fragment>
             );
@@ -2609,9 +2753,13 @@ export default function BowlerReport({
 
         {/* Phase Slides Preview Blocks */}
         {bowlerPhaseStats.phases.map((p, pIdx) => {
-          const statsSlideNum = 6 + (pIdx * 2);
-          const graphicsSlideNum = 6 + (pIdx * 2) + 1;
+          const statsSlideNum = 6 + (pIdx * 4);
+          const graphicsSlideNum = 6 + (pIdx * 4) + 1;
+          const graphicsRHBSlideNum = 6 + (pIdx * 4) + 2;
+          const graphicsLHBSlideNum = 6 + (pIdx * 4) + 3;
           const pG = phaseGraphicsMap[p.phaseName];
+          const pGRHB = phaseGraphicsMap[`${p.phaseName}_RHB`];
+          const pGLHB = phaseGraphicsMap[`${p.phaseName}_LHB`];
 
           return (
             <React.Fragment key={pIdx}>
@@ -2755,6 +2903,7 @@ export default function BowlerReport({
                 </div>
               )}
 
+              {/* Phase Graphics (Overall) */}
               {previewSlide === graphicsSlideNum && (
                 <div
                   id={`bowler-phase-graphics-${pIdx}-node`}
@@ -2770,7 +2919,7 @@ export default function BowlerReport({
                       </h1>
 
                       <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                        <span className="text-slate-950 text-sm">■</span> PHASE WISE – ( {p.phaseName} )
+                        <span className="text-slate-950 text-sm">■</span> PHASE WISE – ( {p.phaseName} ) – OVERALL
                       </div>
                     </div>
 
@@ -2782,7 +2931,7 @@ export default function BowlerReport({
                         />
                       ) : (
                         <div className="flex-1 flex items-center justify-center text-slate-500 text-xs italic">
-                          Wagon Wheel graphic unavailable for {p.phaseName}
+                          Wagon Wheel graphic unavailable for {p.phaseName} (Overall)
                         </div>
                       )}
 
@@ -2793,7 +2942,101 @@ export default function BowlerReport({
                         />
                       ) : (
                         <div className="flex-1 flex items-center justify-center text-slate-500 text-xs italic">
-                          Pitch Map graphic unavailable for {p.phaseName}
+                          Pitch Map graphic unavailable for {p.phaseName} (Overall)
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Phase Graphics (vs RHB) */}
+              {previewSlide === graphicsRHBSlideNum && (
+                <div
+                  id={`bowler-phase-graphics-${pIdx}-rhb-node`}
+                  className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none shadow-2xl shrink-0"
+                  style={{ fontFamily: 'sans-serif' }}
+                >
+                  <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+
+                  <div className="pl-6 flex-1 flex flex-col justify-between">
+                    <div>
+                      <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
+                        {matchTitle}
+                      </h1>
+
+                      <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
+                        <span className="text-slate-950 text-sm">■</span> PHASE WISE – ( {p.phaseName} ) – VS RHB
+                      </div>
+                    </div>
+
+                    <div className="w-full bg-[#071320] border border-slate-800 rounded-xl p-4 shadow-xl flex-1 flex items-center justify-center gap-6">
+                      {pGRHB?.wwSvg ? (
+                        <div
+                          className="w-1/2 h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[340px] [&>svg]:object-contain overflow-hidden"
+                          dangerouslySetInnerHTML={{ __html: pGRHB.wwSvg }}
+                        />
+                      ) : (
+                        <div className="flex-1 flex items-center justify-center text-slate-500 text-xs italic">
+                          Wagon Wheel graphic unavailable for {p.phaseName} (vs RHB)
+                        </div>
+                      )}
+
+                      {pGRHB?.pitchSvg ? (
+                        <div
+                          className="w-1/2 h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[340px] [&>svg]:object-contain overflow-hidden border-l border-slate-800/80 pl-3"
+                          dangerouslySetInnerHTML={{ __html: pGRHB.pitchSvg }}
+                        />
+                      ) : (
+                        <div className="flex-1 flex items-center justify-center text-slate-500 text-xs italic">
+                          Pitch Map graphic unavailable for {p.phaseName} (vs RHB)
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Phase Graphics (vs LHB) */}
+              {previewSlide === graphicsLHBSlideNum && (
+                <div
+                  id={`bowler-phase-graphics-${pIdx}-lhb-node`}
+                  className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none shadow-2xl shrink-0"
+                  style={{ fontFamily: 'sans-serif' }}
+                >
+                  <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+
+                  <div className="pl-6 flex-1 flex flex-col justify-between">
+                    <div>
+                      <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
+                        {matchTitle}
+                      </h1>
+
+                      <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
+                        <span className="text-slate-950 text-sm">■</span> PHASE WISE – ( {p.phaseName} ) – VS LHB
+                      </div>
+                    </div>
+
+                    <div className="w-full bg-[#071320] border border-slate-800 rounded-xl p-4 shadow-xl flex-1 flex items-center justify-center gap-6">
+                      {pGLHB?.wwSvg ? (
+                        <div
+                          className="w-1/2 h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[340px] [&>svg]:object-contain overflow-hidden"
+                          dangerouslySetInnerHTML={{ __html: pGLHB.wwSvg }}
+                        />
+                      ) : (
+                        <div className="flex-1 flex items-center justify-center text-slate-500 text-xs italic">
+                          Wagon Wheel graphic unavailable for {p.phaseName} (vs LHB)
+                        </div>
+                      )}
+
+                      {pGLHB?.pitchSvg ? (
+                        <div
+                          className="w-1/2 h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[340px] [&>svg]:object-contain overflow-hidden border-l border-slate-800/80 pl-3"
+                          dangerouslySetInnerHTML={{ __html: pGLHB.pitchSvg }}
+                        />
+                      ) : (
+                        <div className="flex-1 flex items-center justify-center text-slate-500 text-xs italic">
+                          Pitch Map graphic unavailable for {p.phaseName} (vs LHB)
                         </div>
                       )}
                     </div>
@@ -3823,6 +4066,7 @@ export default function BowlerReport({
                   </div>
                 </div>
 
+                {/* Phase Graphics (Overall) */}
                 <div
                   id={`bowler-phase-graphics-${pIdx}-node`}
                   className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
@@ -3837,7 +4081,7 @@ export default function BowlerReport({
                       </h1>
 
                       <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                        <span className="text-slate-950 text-sm">■</span> PHASE WISE – ( {p.phaseName} )
+                        <span className="text-slate-950 text-sm">■</span> PHASE WISE – ( {p.phaseName} ) – OVERALL
                       </div>
                     </div>
 
@@ -3849,7 +4093,7 @@ export default function BowlerReport({
                         />
                       ) : (
                         <div className="flex-1 flex items-center justify-center text-slate-500 text-xs italic">
-                          Wagon Wheel graphic unavailable for {p.phaseName}
+                          Wagon Wheel graphic unavailable for {p.phaseName} (Overall)
                         </div>
                       )}
 
@@ -3860,7 +4104,97 @@ export default function BowlerReport({
                         />
                       ) : (
                         <div className="flex-1 flex items-center justify-center text-slate-500 text-xs italic">
-                          Pitch Map graphic unavailable for {p.phaseName}
+                          Pitch Map graphic unavailable for {p.phaseName} (Overall)
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Phase Graphics (vs RHB) */}
+                <div
+                  id={`bowler-phase-graphics-${pIdx}-rhb-node`}
+                  className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
+                  style={{ fontFamily: 'sans-serif' }}
+                >
+                  <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+
+                  <div className="pl-6 flex-1 flex flex-col justify-between">
+                    <div>
+                      <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
+                        {matchTitle}
+                      </h1>
+
+                      <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
+                        <span className="text-slate-950 text-sm">■</span> PHASE WISE – ( {p.phaseName} ) – VS RHB
+                      </div>
+                    </div>
+
+                    <div className="w-full bg-[#071320] border border-slate-800 rounded-xl p-4 shadow-xl flex-1 flex items-center justify-center gap-6">
+                      {phaseGraphicsMap[`${p.phaseName}_RHB`]?.wwSvg ? (
+                        <div
+                          className="w-1/2 h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[340px] [&>svg]:object-contain overflow-hidden"
+                          dangerouslySetInnerHTML={{ __html: phaseGraphicsMap[`${p.phaseName}_RHB`].wwSvg }}
+                        />
+                      ) : (
+                        <div className="flex-1 flex items-center justify-center text-slate-500 text-xs italic">
+                          Wagon Wheel graphic unavailable for {p.phaseName} (vs RHB)
+                        </div>
+                      )}
+
+                      {phaseGraphicsMap[`${p.phaseName}_RHB`]?.pitchSvg ? (
+                        <div
+                          className="w-1/2 h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[340px] [&>svg]:object-contain overflow-hidden border-l border-slate-800/80 pl-3"
+                          dangerouslySetInnerHTML={{ __html: phaseGraphicsMap[`${p.phaseName}_RHB`].pitchSvg }}
+                        />
+                      ) : (
+                        <div className="flex-1 flex items-center justify-center text-slate-500 text-xs italic">
+                          Pitch Map graphic unavailable for {p.phaseName} (vs RHB)
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Phase Graphics (vs LHB) */}
+                <div
+                  id={`bowler-phase-graphics-${pIdx}-lhb-node`}
+                  className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
+                  style={{ fontFamily: 'sans-serif' }}
+                >
+                  <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+
+                  <div className="pl-6 flex-1 flex flex-col justify-between">
+                    <div>
+                      <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
+                        {matchTitle}
+                      </h1>
+
+                      <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
+                        <span className="text-slate-950 text-sm">■</span> PHASE WISE – ( {p.phaseName} ) – VS LHB
+                      </div>
+                    </div>
+
+                    <div className="w-full bg-[#071320] border border-slate-800 rounded-xl p-4 shadow-xl flex-1 flex items-center justify-center gap-6">
+                      {phaseGraphicsMap[`${p.phaseName}_LHB`]?.wwSvg ? (
+                        <div
+                          className="w-1/2 h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[340px] [&>svg]:object-contain overflow-hidden"
+                          dangerouslySetInnerHTML={{ __html: phaseGraphicsMap[`${p.phaseName}_LHB`].wwSvg }}
+                        />
+                      ) : (
+                        <div className="flex-1 flex items-center justify-center text-slate-500 text-xs italic">
+                          Wagon Wheel graphic unavailable for {p.phaseName} (vs LHB)
+                        </div>
+                      )}
+
+                      {phaseGraphicsMap[`${p.phaseName}_LHB`]?.pitchSvg ? (
+                        <div
+                          className="w-1/2 h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[340px] [&>svg]:object-contain overflow-hidden border-l border-slate-800/80 pl-3"
+                          dangerouslySetInnerHTML={{ __html: phaseGraphicsMap[`${p.phaseName}_LHB`].pitchSvg }}
+                        />
+                      ) : (
+                        <div className="flex-1 flex items-center justify-center text-slate-500 text-xs italic">
+                          Pitch Map graphic unavailable for {p.phaseName} (vs LHB)
                         </div>
                       )}
                     </div>

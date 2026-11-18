@@ -5,6 +5,8 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import os from 'os';
+import { execSync } from 'child_process';
 import { clientTemplates, generatePdfReport, generatePptxReport } from '@cricket-reports/report-engine';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -22,7 +24,8 @@ export function getDatabaseConnection() {
   // 3. System Kadamba default path
   const candidatePaths = [
     process.env.CRICKET_DB_PATH,
-    // 'C:/Program Files (x86)/Kadamba/Jukebox_Venue_Setup/DB/Cricket',
+    'C:/Program Files (x86)/Kadamba/Jukebox_Lite_Setup/DB/Cricket',
+    'C:/Program Files (x86)/Kadamba/Jukebox_Venue_Setup/DB/Cricket',
     'D:/Program Files (x86)/Kadamba/Jukebox_Venue_Setup/DB/Cricket',
     'C:/Kadamba/Jukebox_Venue_Setup/DB/Cricket',
     'C:\\Program Files (x86)\\Kadamba\\Jukebox_Venue_Setup\\DB\\Cricket',
@@ -79,18 +82,75 @@ app.get('/api/status', (req, res) => {
 app.post('/api/config/db-path', (req, res) => {
   try {
     const { newDbPath } = req.body;
-    if (!fs.existsSync(newDbPath)) {
-      return res.status(404).json({ error: 'Database file not found at specified path' });
+    if (!newDbPath) {
+      return res.status(400).json({ error: 'Database path cannot be empty' });
+    }
+    const trimmedPath = newDbPath.trim();
+    if (!fs.existsSync(trimmedPath)) {
+      return res.status(404).json({ error: `Database file not found at: ${trimmedPath}` });
     }
     if (dbInstance) {
-      dbInstance.close();
+      try {
+        dbInstance.close();
+      } catch (closeErr) {
+        console.warn('Error closing prior db instance:', closeErr);
+      }
       dbInstance = null;
     }
-    process.env.CRICKET_DB_PATH = newDbPath;
+    process.env.CRICKET_DB_PATH = trimmedPath;
     getDatabaseConnection();
     res.json({ success: true, dbPath: currentDbPath });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Native File Explorer Picker Endpoint (Windows OpenFileDialog)
+app.post('/api/config/select-file', (req, res) => {
+  if (process.platform !== 'win32') {
+    return res.status(400).json({ error: 'Folder/File explorer picker is supported on Windows environments' });
+  }
+
+  const tmpScriptPath = path.join(os.tmpdir(), `pick_db_${Date.now()}_${Math.random().toString(36).substring(7)}.ps1`);
+  const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = "Select Cricket SQLite Database File"
+$dialog.Filter = "All Files (*.*)|*.*|SQLite DB (*.db;*.sqlite)|*.db;*.sqlite"
+$dialog.Multiselect = $false
+$dialog.CheckFileExists = $true
+$result = $dialog.ShowDialog()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    Write-Output $dialog.FileName
+} else {
+    Write-Output "CANCELLED"
+}
+`;
+
+  try {
+    fs.writeFileSync(tmpScriptPath, psScript, 'utf8');
+    const stdout = execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpScriptPath}"`, {
+      encoding: 'utf8',
+      windowsHide: false
+    });
+    const selectedFile = stdout.trim();
+
+    if (!selectedFile || selectedFile === 'CANCELLED') {
+      return res.json({ cancelled: true });
+    }
+
+    const cleanPath = selectedFile.replace(/\\/g, '/');
+    return res.json({ cancelled: false, filePath: cleanPath });
+  } catch (err) {
+    console.error('Error invoking OpenFileDialog via PowerShell:', err);
+    return res.status(500).json({ error: 'Failed to launch file explorer: ' + err.message });
+  } finally {
+    try {
+      if (fs.existsSync(tmpScriptPath)) {
+        fs.unlinkSync(tmpScriptPath);
+      }
+    } catch (_) {}
   }
 });
 

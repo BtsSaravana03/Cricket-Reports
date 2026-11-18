@@ -6,11 +6,12 @@ import { jsPDF } from 'jspdf';
 import {
   Trophy, Lock, User, LogOut, FileText, Presentation, Shield,
   Layers, ChevronRight, Activity, ArrowLeft, Eye, Download, CheckCircle2, Play,
-  Filter, RefreshCw
+  Filter, RefreshCw, Database, FolderOpen, Check, AlertCircle, Printer, Loader2
 } from 'lucide-react';
 
 import BowlerReport from './components/BowlerReport';
 import MatchReport from './components/MatchReport';
+import { printPdfDocument } from './utils/printPdf';
 
 const API_BASE = '/api';
 
@@ -240,28 +241,106 @@ export default function App() {
   const [selectedBowlerId, setSelectedBowlerId] = useState('');
   const [previewSlide, setPreviewSlide] = useState(1);
 
-  // Filter State for Delivery & Match Analytics
-  const [selectedPhase, setSelectedPhase] = useState('Powerplay (1–6)'); // 'All Phases (1–20)', 'Powerplay (1–6)', 'Middle (7–10)', 'Middle-Late (11–15)', 'Death Overs (16–20)'
-  const [oversRange, setOversRange] = useState({ min: 1, max: 6 });
-  const [selectedBatterHand, setSelectedBatterHand] = useState('vs RHB'); // 'All', 'vs RHB', 'vs LHB'
-  const [selectedBowlingCategory, setSelectedBowlingCategory] = useState('vs Spin'); // 'All', 'vs Pace', 'vs Spin'
-  const [selectedInningsContext, setSelectedInningsContext] = useState('1st Innings'); // '1st Innings', '2nd Innings', 'Both'
+  // Filter State for Delivery & Match Analytics (default: no filters selected)
+  const [selectedPhase, setSelectedPhase] = useState('All'); // 'All' or specific phase id/label
+  const [oversRange, setOversRange] = useState({ min: 1, max: 20 });
+  const [selectedBatterHand, setSelectedBatterHand] = useState('All'); // 'All', 'vs RHB', 'vs LHB'
+  const [selectedBowlingCategory, setSelectedBowlingCategory] = useState('All'); // 'All', 'vs Pace', 'vs Spin'
+  const [selectedInningsContext, setSelectedInningsContext] = useState('Both'); // '1st Innings', '2nd Innings', 'Both'
   const [appliedFilters, setAppliedFilters] = useState({
-    phase: 'Powerplay (1–6)',
+    phase: 'All',
     oversMin: 1,
-    oversMax: 6,
-    batterHand: 'vs RHB',
-    bowlingCategory: 'vs Spin',
-    inningsContext: '1st Innings'
+    oversMax: 20,
+    batterHand: 'All',
+    bowlingCategory: 'All',
+    inningsContext: 'Both'
   });
 
   // Loading states
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [actionFormat, setActionFormat] = useState(null);
+
+  // Database Connection Management State
+  const [dbPath, setDbPath] = useState('');
+  const [inputDbPath, setInputDbPath] = useState('');
+  const [isDbConnected, setIsDbConnected] = useState(false);
+  const [isConnectingDb, setIsConnectingDb] = useState(false);
+  const [isBrowsingFile, setIsBrowsingFile] = useState(false);
+  const [dbFeedback, setDbFeedback] = useState(null); // { type: 'success' | 'error', message: string }
+  const [showDbModal, setShowDbModal] = useState(false);
 
   useEffect(() => {
     fetchTemplates();
+    fetchDbStatus();
   }, []);
+
+  const handleBrowseFile = async () => {
+    setIsBrowsingFile(true);
+    setDbFeedback(null);
+    try {
+      const res = await axios.post(`${API_BASE}/config/select-file`);
+      if (res.data && !res.data.cancelled && res.data.filePath) {
+        setInputDbPath(res.data.filePath);
+        // Automatically attempt connect to chosen file
+        await handleConnectDb(res.data.filePath);
+      }
+    } catch (err) {
+      const errMsg = err.response?.data?.error || err.message || 'Error opening file browser';
+      setDbFeedback({ type: 'error', message: errMsg });
+    } finally {
+      setIsBrowsingFile(false);
+    }
+  };
+
+  const fetchDbStatus = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/status`);
+      if (res.data) {
+        if (res.data.dbPath) {
+          setDbPath(res.data.dbPath);
+          setInputDbPath(res.data.dbPath);
+        }
+        setIsDbConnected(!!res.data.dbConnected);
+      }
+    } catch (err) {
+      console.warn('Could not fetch DB status:', err.message);
+    }
+  };
+
+  const handleConnectDb = async (pathToSet) => {
+    const targetPath = (pathToSet !== undefined ? pathToSet : inputDbPath).trim();
+    if (!targetPath) {
+      setDbFeedback({ type: 'error', message: 'Please enter a valid SQLite database path.' });
+      return;
+    }
+    setIsConnectingDb(true);
+    setDbFeedback(null);
+    try {
+      const res = await axios.post(`${API_BASE}/config/db-path`, { newDbPath: targetPath });
+      if (res.data && res.data.success) {
+        setDbPath(res.data.dbPath);
+        setInputDbPath(res.data.dbPath);
+        setIsDbConnected(true);
+        setDbFeedback({ type: 'success', message: 'Connected successfully to Database!' });
+        // Reload competitions and matches if user is logged in
+        if (isLoggedIn) {
+          loadCompetitions();
+          setSelectedCompId('');
+          setSelectedMatchId('');
+          setMatches([]);
+          resetMatchForm();
+        }
+      } else {
+        setDbFeedback({ type: 'error', message: res.data?.error || 'Failed to connect to database' });
+      }
+    } catch (err) {
+      const errMsg = err.response?.data?.error || err.message || 'Error connecting to database';
+      setDbFeedback({ type: 'error', message: errMsg });
+    } finally {
+      setIsConnectingDb(false);
+    }
+  };
 
   useEffect(() => {
     if (isLoggedIn) {
@@ -272,6 +351,7 @@ export default function App() {
   const fetchTemplates = async () => {
     try {
       const res = await axios.get(`${API_BASE}/templates`);
+      console.log(res.data);
       setTemplates(res.data);
     } catch (err) {
       console.error('Error fetching templates:', err);
@@ -516,17 +596,86 @@ export default function App() {
     name: "DELHI CAPITALS"
   };
 
+  // Match category detection (ODI, T20, MULTIDAY / TEST)
+  const currentMatchCategory = React.useMemo(() => {
+    const matchTypeId = ballData[0]?.MatchTypeID || matchDetails?.MatchTypeID || 2;
+    const odiTypes = [2, 5, 9, 12, 15, 18, 21, 27, 30, 33, 36, 38, 56];
+    const t20Types = [3, 6, 7, 10, 13, 16, 19, 22, 28, 31, 34, 37, 39, 40, 41, 42, 43, 44, 45, 50, 51, 53, 54, 55, 91];
+
+    if (odiTypes.includes(Number(matchTypeId))) return 'ODI';
+    if (t20Types.includes(Number(matchTypeId))) return 'T20';
+    return 'MULTIDAY';
+  }, [ballData, matchDetails]);
+
+  // Dynamic Phase configuration based on match format
+  const phaseConfig = React.useMemo(() => {
+    if (currentMatchCategory === 'ODI') {
+      return {
+        formatName: 'One Day (50 Overs)',
+        maxOvers: 50,
+        phases: [
+          { id: '01-10 OVERS', label: '01-10 Overs', min: 1, max: 10 },
+          { id: '11-20 OVERS', label: '11-20 Overs', min: 11, max: 20 },
+          { id: '21-30 OVERS', label: '21-30 Overs', min: 21, max: 30 },
+          { id: '31-40 OVERS', label: '31-40 Overs', min: 31, max: 40 },
+          { id: '41-50 OVERS', label: '41-50 Overs', min: 41, max: 50 }
+        ],
+        sliderTicks: [1, 10, 20, 30, 40, 50]
+      };
+    } else if (currentMatchCategory === 'T20') {
+      return {
+        formatName: 'T20 (20 Overs)',
+        maxOvers: 20,
+        phases: [
+          { id: '01-06 OVERS', label: 'Powerplay (1–6)', min: 1, max: 6 },
+          { id: '07-10 OVERS', label: 'Middle (7–10)', min: 7, max: 10 },
+          { id: '11-15 OVERS', label: 'Middle-Late (11–15)', min: 11, max: 15 },
+          { id: '16-20 OVERS', label: 'Death Overs (16–20)', min: 16, max: 20 }
+        ],
+        sliderTicks: [1, 6, 10, 15, 20]
+      };
+    } else {
+      // Multi-Day / Test
+      return {
+        formatName: 'Multi-Day / Test',
+        maxOvers: 120,
+        phases: [
+          { id: '1-25 OVERS (NEW BALL)', label: 'Phase 1-25 (New Ball)', min: 1, max: 25 },
+          { id: '26-60 OVERS (SEMI NEW BALL)', label: 'Phase 26-60 (Semi New)', min: 26, max: 60 },
+          { id: '61-80 OVERS (OLD BALL)', label: 'Phase 61-80 (Old Ball)', min: 61, max: 80 },
+          { id: '81+ OVERS (SECOND NEW BALL)', label: 'Phase 81+ (2nd New Ball)', min: 81, max: 120 }
+        ],
+        sliderTicks: [1, 25, 60, 80, 120]
+      };
+    }
+  }, [currentMatchCategory]);
+
+  // Adjust default overs range when match category / max overs change if no custom overs selected
+  useEffect(() => {
+    if (selectedPhase === 'All') {
+      setOversRange({ min: 1, max: phaseConfig.maxOvers });
+      setAppliedFilters(prev => {
+        if (prev.phase === 'All') {
+          return { ...prev, oversMin: 1, oversMax: phaseConfig.maxOvers };
+        }
+        return prev;
+      });
+    }
+  }, [phaseConfig]);
+
   // Filter dataset strictly by APPLIED match & delivery filters (only rebuilds on clicking "Apply Filters" or "Reset All")
   const filteredBallData = React.useMemo(() => {
     if (!ballData || ballData.length === 0) return [];
-    
+
     return ballData.filter((b) => {
-      // 1. Overs Range filter
-      const over = b.OverId !== undefined && b.OverId !== null 
-        ? Number(b.OverId) 
+      // 1. Overs Range filter (applied if not default full range)
+      const over = b.OverId !== undefined && b.OverId !== null
+        ? Number(b.OverId)
         : Math.floor(Number(b.Overs !== undefined ? b.Overs : 0));
-      if (over < appliedFilters.oversMin || over > appliedFilters.oversMax) {
-        return false;
+      if (appliedFilters.phase !== 'All' || appliedFilters.oversMin > 1 || appliedFilters.oversMax < phaseConfig.maxOvers) {
+        if (over < appliedFilters.oversMin || over > appliedFilters.oversMax) {
+          return false;
+        }
       }
 
       // 2. Batter Handedness filter
@@ -571,57 +720,58 @@ export default function App() {
 
       return true;
     });
-  }, [ballData, appliedFilters]);
+  }, [ballData, appliedFilters, phaseConfig.maxOvers]);
 
   // Count active filters in the current draft selection
   const activeFiltersCount = React.useMemo(() => {
     let count = 0;
-    if (selectedPhase !== 'All Phases (1–20)') count += 1;
-    if (oversRange.min !== 1 || oversRange.max !== 20) count += 1;
+    if (selectedPhase !== 'All') count += 1;
+    if (oversRange.min !== 1 || oversRange.max !== phaseConfig.maxOvers) count += 1;
     if (selectedBatterHand !== 'All') count += 1;
     if (selectedBowlingCategory !== 'All') count += 1;
     if (selectedInningsContext !== 'Both') count += 1;
     return count;
-  }, [selectedPhase, oversRange, selectedBatterHand, selectedBowlingCategory, selectedInningsContext]);
+  }, [selectedPhase, oversRange, selectedBatterHand, selectedBowlingCategory, selectedInningsContext, phaseConfig.maxOvers]);
 
   // Count active applied filters
   const activeAppliedFiltersCount = React.useMemo(() => {
     let count = 0;
-    if (appliedFilters.phase !== 'All Phases (1–20)') count += 1;
-    if (appliedFilters.oversMin !== 1 || appliedFilters.oversMax !== 20) count += 1;
+    if (appliedFilters.phase !== 'All') count += 1;
+    if (appliedFilters.oversMin !== 1 || appliedFilters.oversMax !== phaseConfig.maxOvers) count += 1;
     if (appliedFilters.batterHand !== 'All') count += 1;
     if (appliedFilters.bowlingCategory !== 'All') count += 1;
     if (appliedFilters.inningsContext !== 'Both') count += 1;
     return count;
-  }, [appliedFilters]);
+  }, [appliedFilters, phaseConfig.maxOvers]);
 
   // Handle phase quick select
-  const handlePhaseSelect = (phaseName) => {
-    setSelectedPhase(phaseName);
-    if (phaseName === 'Powerplay (1–6)') {
-      setOversRange({ min: 1, max: 6 });
-    } else if (phaseName === 'Middle (7–10)') {
-      setOversRange({ min: 7, max: 10 });
-    } else if (phaseName === 'Middle-Late (11–15)') {
-      setOversRange({ min: 11, max: 15 });
-    } else if (phaseName === 'Death Overs (16–20)') {
-      setOversRange({ min: 16, max: 20 });
-    } else if (phaseName === 'All Phases (1–20)') {
-      setOversRange({ min: 1, max: 20 });
+  const handlePhaseSelect = (phaseId) => {
+    if (phaseId === 'All') {
+      setSelectedPhase('All');
+      setOversRange({ min: 1, max: phaseConfig.maxOvers });
+      return;
+    }
+
+    const found = phaseConfig.phases.find(p => p.id === phaseId);
+    if (found) {
+      setSelectedPhase(found.id);
+      setOversRange({ min: found.min, max: found.max });
+    } else {
+      setSelectedPhase(phaseId);
     }
   };
 
   // Handle reset all filters
   const handleResetFilters = () => {
-    setSelectedPhase('All Phases (1–20)');
-    setOversRange({ min: 1, max: 20 });
+    setSelectedPhase('All');
+    setOversRange({ min: 1, max: phaseConfig.maxOvers });
     setSelectedBatterHand('All');
     setSelectedBowlingCategory('All');
     setSelectedInningsContext('Both');
     setAppliedFilters({
-      phase: 'All Phases (1–20)',
+      phase: 'All',
       oversMin: 1,
-      oversMax: 20,
+      oversMax: phaseConfig.maxOvers,
       batterHand: 'All',
       bowlingCategory: 'All',
       inningsContext: 'Both'
@@ -1225,6 +1375,7 @@ export default function App() {
   // PPTX: Builds native, fully EDITABLE PowerPoint text boxes, vector shapes, L-corner frames & tables
   const handleDownload = async (format) => {
     setDownloading(true);
+    setActionFormat(format);
     try {
       const safeName = (activeBatter.name || 'Batter').replace(/[^a-zA-Z0-9]/g, '_');
       const compName = matchDetails?.CompFullName || matchDetails?.CompPrefix || 'IPL 2025';
@@ -1810,12 +1961,17 @@ export default function App() {
           }
         }
 
-        pdf.save(`Report_${selectedReportType}_${safeName}.pdf`);
+        if (format === 'print') {
+          printPdfDocument(pdf);
+        } else {
+          pdf.save(`Report_${selectedReportType}_${safeName}.pdf`);
+        }
       }
     } catch (err) {
       console.error('Report export error:', err);
     } finally {
       setDownloading(false);
+      setActionFormat(null);
     }
   };
 
@@ -1888,6 +2044,67 @@ export default function App() {
               Sign In to Studio
             </button>
           </form>
+
+          {/* Database Setup Section on Login */}
+          <div className="pt-4 border-t border-slate-800">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold text-slate-400 flex items-center gap-1.5">
+                <Database className="w-3.5 h-3.5 text-blue-400" />
+                SQLite Database Setup
+              </span>
+              <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${isDbConnected ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'}`}>
+                {isDbConnected ? 'Connected' : 'Not Connected'}
+              </span>
+            </div>
+
+            <p className="text-[11px] text-slate-500 mb-2.5">
+              Default DB is used automatically. You can enter or paste a custom database path:
+            </p>
+
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={inputDbPath}
+                  onChange={(e) => setInputDbPath(e.target.value)}
+                  placeholder="e.g. C:/Kadamba/Jukebox_Venue_Setup/DB/Cricket"
+                  className="flex-1 bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={handleBrowseFile}
+                  disabled={isBrowsingFile || isConnectingDb}
+                  title="Choose SQLite database file from Folder Explorer"
+                  className="bg-slate-800 hover:bg-slate-700 active:bg-slate-600 disabled:opacity-50 text-slate-200 px-3 py-2 rounded-lg text-xs font-semibold border border-slate-700 transition-all flex items-center gap-1.5 shrink-0"
+                >
+                  <FolderOpen className={`w-3.5 h-3.5 text-blue-400 ${isBrowsingFile ? 'animate-pulse' : ''}`} />
+                  <span>{isBrowsingFile ? 'Opening...' : 'Browse'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleConnectDb()}
+                  disabled={isConnectingDb}
+                  className="bg-blue-600 hover:bg-blue-500 active:bg-blue-700 disabled:opacity-50 text-white px-3.5 py-2 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 shrink-0"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isConnectingDb ? 'animate-spin' : ''}`} />
+                  <span>{isConnectingDb ? 'Connecting...' : 'Connect'}</span>
+                </button>
+              </div>
+
+              {dbFeedback && (
+                <div className={`p-2.5 rounded-lg text-xs flex items-center gap-2 ${dbFeedback.type === 'success' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'}`}>
+                  {dbFeedback.type === 'success' ? <Check className="w-3.5 h-3.5 shrink-0" /> : <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
+                  <span className="truncate">{dbFeedback.message}</span>
+                </div>
+              )}
+
+              {dbPath && (
+                <div className="text-[10px] text-slate-500 truncate" title={dbPath}>
+                  <span className="text-slate-400 font-medium">Active DB: </span>{dbPath}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -1909,7 +2126,25 @@ export default function App() {
           </div>
         </div>
 
-        <div className="flex items-center space-x-4">
+        <div className="flex items-center space-x-3">
+          {/* Database Connection Pill */}
+          <button
+            onClick={() => {
+              setDbFeedback(null);
+              setShowDbModal(true);
+            }}
+            className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+              isDbConnected
+                ? 'bg-emerald-950/40 text-emerald-300 border-emerald-500/30 hover:bg-emerald-900/50'
+                : 'bg-amber-950/40 text-amber-300 border-amber-500/30 hover:bg-amber-900/50'
+            }`}
+            title="Configure SQLite Database Connection"
+          >
+            <Database className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">DB:</span>
+            <span className="font-semibold">{isDbConnected ? 'Connected' : 'Offline'}</span>
+          </button>
+
           <button
             onClick={handleLogout}
             className="flex items-center space-x-2 bg-slate-800 hover:bg-slate-700 text-slate-300 px-3.5 py-1.5 rounded-lg text-xs font-medium border border-slate-700 transition-all"
@@ -1919,6 +2154,130 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {/* Database Connection Modal */}
+      {showDbModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs">
+          <div className="bg-slate-900 border border-slate-800 w-full max-w-lg rounded-2xl p-6 shadow-2xl relative space-y-5 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+              <div className="flex items-center space-x-2.5">
+                <div className="p-2 bg-blue-600/20 text-blue-400 border border-blue-500/30 rounded-lg">
+                  <Database className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Database Connection Setup</h3>
+                  <p className="text-xs text-slate-400">Configure or switch the SQLite database file</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowDbModal(false)}
+                className="text-slate-400 hover:text-white p-1 text-sm rounded-lg hover:bg-slate-800 transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
+                  Database File Path
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={inputDbPath}
+                    onChange={(e) => setInputDbPath(e.target.value)}
+                    placeholder="e.g. C:/Kadamba/Jukebox_Venue_Setup/DB/Cricket"
+                    className="flex-1 bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg px-3.5 py-2.5 text-xs text-slate-100 placeholder-slate-600 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleBrowseFile}
+                    disabled={isBrowsingFile || isConnectingDb}
+                    title="Choose SQLite database file from Folder Explorer"
+                    className="bg-slate-800 hover:bg-slate-700 active:bg-slate-600 disabled:opacity-50 text-slate-200 px-3.5 py-2.5 rounded-lg text-xs font-semibold border border-slate-700 transition-all flex items-center gap-1.5 shrink-0"
+                  >
+                    <FolderOpen className={`w-3.5 h-3.5 text-blue-400 ${isBrowsingFile ? 'animate-pulse' : ''}`} />
+                    <span>{isBrowsingFile ? 'Opening...' : 'Browse Explorer'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleConnectDb()}
+                    disabled={isConnectingDb}
+                    className="bg-blue-600 hover:bg-blue-500 active:bg-blue-700 disabled:opacity-50 text-white px-4 py-2.5 rounded-lg text-xs font-semibold shadow-lg shadow-blue-500/20 transition-all flex items-center gap-1.5 shrink-0"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isConnectingDb ? 'animate-spin' : ''}`} />
+                    <span>{isConnectingDb ? 'Connecting...' : 'Connect'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {dbFeedback && (
+                <div
+                  className={`p-3 rounded-lg text-xs flex items-center gap-2.5 ${
+                    dbFeedback.type === 'success'
+                      ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                      : 'bg-red-500/10 text-red-400 border border-red-500/20'
+                  }`}
+                >
+                  {dbFeedback.type === 'success' ? (
+                    <Check className="w-4 h-4 shrink-0 text-emerald-400" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+                  )}
+                  <span>{dbFeedback.message}</span>
+                </div>
+              )}
+
+              {/* Quick Preset Candidates */}
+              <div>
+                <div className="text-[11px] font-semibold text-slate-400 mb-2">Preset Candidate Locations:</div>
+                <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                  {[
+                    'C:/Program Files (x86)/Kadamba/Jukebox_Lite_Setup/DB/Cricket',
+                    'C:/Program Files (x86)/Kadamba/Jukebox_Venue_Setup/DB/Cricket',
+                    'D:/Program Files (x86)/Kadamba/Jukebox_Venue_Setup/DB/Cricket',
+                    'C:/Kadamba/Jukebox_Venue_Setup/DB/Cricket'
+                  ].map((cand, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => {
+                        setInputDbPath(cand);
+                        handleConnectDb(cand);
+                      }}
+                      className="w-full text-left text-[11px] px-2.5 py-1.5 rounded-md bg-slate-950/70 hover:bg-slate-800 border border-slate-800/80 text-slate-300 font-mono truncate transition-colors flex items-center justify-between group"
+                    >
+                      <span className="truncate">{cand}</span>
+                      <span className="text-[10px] text-blue-400 group-hover:underline ml-2 shrink-0">Use</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="p-3 bg-slate-950/50 rounded-lg border border-slate-800/80 text-[11px] text-slate-400 space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-300 font-semibold">Current Active Path:</span>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${isDbConnected ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
+                    {isDbConnected ? 'ACTIVE' : 'OFFLINE'}
+                  </span>
+                </div>
+                <div className="font-mono text-slate-300 break-all">{dbPath || 'None'}</div>
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setShowDbModal(false)}
+                className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded-lg text-xs font-semibold transition-all"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ------------------------------------------------------------- */}
       {/* VIEW 2: HOMEPAGE */}
@@ -2008,874 +2367,659 @@ export default function App() {
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
                 <h2 className="text-lg font-bold text-white">1. Select Competition & Match</h2>
 
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              {/* Competition Dropdown */}
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                  Competition
-                </label>
-                <select
-                  value={selectedCompId}
-                  onChange={(e) => handleCompetitionChange(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-2.5 text-sm text-slate-100 focus:outline-none"
-                >
-                  <option value="">-- Choose Competition --</option>
-                  {competitions.map((c) => (
-                    <option key={c.ID || c.id} value={c.ID || c.id}>
-                      {c.NAME || c.Name || c.name} ({c.SEASON || c.Season || '2025-26'})
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Match Dropdown */}
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                  Match
-                </label>
-                <select
-                  disabled={!selectedCompId}
-                  value={selectedMatchId}
-                  onChange={(e) => handleMatchChange(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-2.5 text-sm text-slate-100 focus:outline-none disabled:opacity-40"
-                >
-                  <option value="">-- Choose Match --</option>
-                  {matches.map((m) => (
-                    <option key={m.ID} value={m.ID}>
-                      {m.MatchNameDate || m.MatchNameShort || m.MatchName}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Client Template Profile */}
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                  Client Profile
-                </label>
-                <select
-                  value={selectedTemplateId}
-                  onChange={(e) => setSelectedTemplateId(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-2.5 text-sm text-slate-100 focus:outline-none"
-                >
-                  <option value="vca">Vidarbha (VCA)</option>
-                  <option value="bcci">BCCI Profile</option>
-                  <option value="icc">ICC Default</option>
-                </select>
-              </div>
-
-              {/* Report Type */}
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                  Report Type
-                </label>
-                <select
-                  value={selectedReportType}
-                  onChange={(e) => setSelectedReportType(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-2.5 text-sm text-slate-100 focus:outline-none"
-                >
-                  <option value="vca-batter">VCA Batter Report</option>
-                  <option value="vca-bowler">VCA Bowler Report</option>
-                  <option value="vca-postmatch">VCA Post Match Report</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Fetch & Load Data Button */}
-            <div className="pt-2 flex items-center justify-between border-t border-slate-800">
-              <div className="text-xs text-slate-400">
-                {isDataFetched && (
-                  <span className="text-emerald-400 flex items-center gap-1 font-medium">
-                    <CheckCircle2 className="w-4 h-4" /> Loaded {ballData.length} deliveries for match #{selectedMatchId}
-                  </span>
-                )}
-              </div>
-
-              <button
-                disabled={!selectedMatchId || loading}
-                onClick={handleGenerateReport}
-                className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white font-semibold px-6 py-2.5 rounded-lg shadow-lg shadow-blue-500/20 text-sm transition-all flex items-center space-x-2"
-              >
-                <Activity className="w-4 h-4" />
-                <span>{loading ? 'Fetching Ball Data...' : 'Fetch Match & Ball Data'}</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Player & Team Selection Controls (Shown after Data Fetched) */}
-          {isDataFetched && selectedReportType !== 'vca-postmatch' && (
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
-              <h3 className="text-base font-bold text-white flex items-center gap-2">
-                <User className="w-4 h-4 text-blue-400" /> 2. Report Target Selection
-              </h3>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {/* Select Team */}
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                    Select Team
-                  </label>
-                  <select
-                    value={selectedTeamId}
-                    onChange={(e) => handleTeamChange(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-3 text-sm text-slate-100 focus:outline-none"
-                  >
-                    {availableTeams.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* Select Batter / Bowler */}
-                {selectedReportType === 'vca-bowler' ? (
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  {/* Competition Dropdown */}
                   <div>
                     <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                      Select Bowler ({availableBowlers.length} Bowlers Available)
+                      Competition
                     </label>
                     <select
-                      value={selectedBowlerId}
-                      onChange={(e) => setSelectedBowlerId(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-3 text-sm text-slate-100 focus:outline-none"
+                      value={selectedCompId}
+                      onChange={(e) => handleCompetitionChange(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-2.5 text-sm text-slate-100 focus:outline-none"
                     >
-                      {availableBowlers.map((b) => (
-                        <option key={b.id} value={b.id}>
-                          {b.name} ({b.bwStyle})
+                      <option value="">-- Choose Competition --</option>
+                      {competitions.map((c) => (
+                        <option key={c.ID || c.id} value={c.ID || c.id}>
+                          {c.NAME || c.Name || c.name} ({c.SEASON || c.Season || '2025-26'})
                         </option>
                       ))}
                     </select>
                   </div>
+
+                  {/* Match Dropdown */}
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                      Match
+                    </label>
+                    <select
+                      disabled={!selectedCompId}
+                      value={selectedMatchId}
+                      onChange={(e) => handleMatchChange(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-2.5 text-sm text-slate-100 focus:outline-none disabled:opacity-40"
+                    >
+                      <option value="">-- Choose Match --</option>
+                      {matches.map((m) => (
+                        <option key={m.ID} value={m.ID}>
+                          {m.MatchNameDate || m.MatchNameShort || m.MatchName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Client Template Profile */}
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                      Client Profile
+                    </label>
+                    <select
+                      value={selectedTemplateId}
+                      onChange={(e) => setSelectedTemplateId(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-2.5 text-sm text-slate-100 focus:outline-none"
+                    >
+                      <option value="vca">Vidarbha (VCA)</option>
+                      {/* <option value="bcci">BCCI Profile</option>
+                      <option value="icc">ICC Default</option> */}
+                    </select>
+                  </div>
+
+                  {/* Report Type */}
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                      Report Type
+                    </label>
+                    <select
+                      value={selectedReportType}
+                      onChange={(e) => setSelectedReportType(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-2.5 text-sm text-slate-100 focus:outline-none"
+                    >
+                      <option value="vca-batter">VCA Batter Report</option>
+                      <option value="vca-bowler">VCA Bowler Report</option>
+                      <option value="vca-postmatch">VCA Post Match Report</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Fetch & Load Data Button */}
+                <div className="pt-2 flex items-center justify-between border-t border-slate-800">
+                  <div className="text-xs text-slate-400">
+                    {isDataFetched && (
+                      <span className="text-emerald-400 flex items-center gap-1 font-medium">
+                        <CheckCircle2 className="w-4 h-4" /> Loaded {ballData.length} deliveries for match #{selectedMatchId}
+                      </span>
+                    )}
+                  </div>
+
+                  <button
+                    disabled={!selectedMatchId || loading}
+                    onClick={handleGenerateReport}
+                    className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white font-semibold px-6 py-2.5 rounded-lg shadow-lg shadow-blue-500/20 text-sm transition-all flex items-center space-x-2"
+                  >
+                    <Activity className="w-4 h-4" />
+                    <span>{loading ? 'Fetching Ball Data...' : 'Fetch Match & Ball Data'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Player & Team Selection Controls (Shown after Data Fetched) */}
+              {isDataFetched && selectedReportType !== 'vca-postmatch' && (
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <User className="w-4 h-4 text-blue-400" /> 2. Report Target Selection
+                  </h3>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {/* Select Team */}
+                    <div>
+                      <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                        Select Team
+                      </label>
+                      <select
+                        value={selectedTeamId}
+                        onChange={(e) => handleTeamChange(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-3 text-sm text-slate-100 focus:outline-none"
+                      >
+                        {availableTeams.map((t) => (
+                          <option key={t.id} value={t.id}>
+                            {t.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Select Batter / Bowler */}
+                    {selectedReportType === 'vca-bowler' ? (
+                      <div>
+                        <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                          Select Bowler ({availableBowlers.length} Bowlers Available)
+                        </label>
+                        <select
+                          value={selectedBowlerId}
+                          onChange={(e) => setSelectedBowlerId(e.target.value)}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-3 text-sm text-slate-100 focus:outline-none"
+                        >
+                          {availableBowlers.map((b) => (
+                            <option key={b.id} value={b.id}>
+                              {b.name} ({b.bwStyle})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    ) : (
+                      <div>
+                        <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                          Select Batter ({availableBatters.length} Players Available)
+                        </label>
+                        <select
+                          value={selectedBatterId}
+                          onChange={(e) => setSelectedBatterId(e.target.value)}
+                          className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-3 text-sm text-slate-100 focus:outline-none"
+                        >
+                          {availableBatters.map((b) => (
+                            <option key={b.id} value={b.id}>
+                              {b.name} ({b.batStyle})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Action Bar & Export Options */}
+              {isDataFetched && selectedReportType !== 'vca-postmatch' && selectedReportType !== 'vca-bowler' && (
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col md:flex-row items-center justify-between gap-4">
+                  <div>
+                    <h3 className="text-base font-bold text-white">Report Preview Ready</h3>
+                    <p className="text-xs text-slate-400">
+                      Target Batter: <strong className="text-blue-400">{activeBatter.name}</strong> ({activeBatter.batStyle}) | {batterBalls.length} Balls Faced
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
+                    <button
+                      onClick={() => setShowPreview(!showPreview)}
+                      className="flex-1 md:flex-none flex items-center justify-center space-x-2 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium px-4 py-2.5 rounded-lg border border-slate-700 text-sm transition-all"
+                    >
+                      <Eye className="w-4 h-4 text-blue-400" />
+                      <span>{showPreview ? 'Hide HTML Preview' : 'Show HTML Preview'}</span>
+                    </button>
+
+                    <button
+                      disabled={downloading}
+                      onClick={() => handleDownload('pdf')}
+                      className="flex-1 md:flex-none flex items-center justify-center space-x-2 bg-rose-600 hover:bg-rose-500 text-white font-medium px-4 py-2.5 rounded-lg shadow-md shadow-rose-500/20 text-sm transition-all disabled:opacity-50"
+                    >
+                      {downloading && actionFormat === 'pdf' ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Download className="w-4 h-4" />
+                      )}
+                      <span>{downloading && actionFormat === 'pdf' ? 'Preparing PDF...' : 'Download PDF'}</span>
+                    </button>
+
+                    <button
+                      disabled={downloading}
+                      onClick={() => handleDownload('print')}
+                      title="Print PDF report directly to printer"
+                      className="flex-1 md:flex-none flex items-center justify-center space-x-2 bg-emerald-600 hover:bg-emerald-500 text-white font-medium px-4 py-2.5 rounded-lg shadow-md shadow-emerald-500/20 text-sm transition-all disabled:opacity-50"
+                    >
+                      {downloading && actionFormat === 'print' ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Printer className="w-4 h-4" />
+                      )}
+                      <span>{downloading && actionFormat === 'print' ? 'Opening Print...' : 'Print PDF'}</span>
+                    </button>
+
+                    <button
+                      disabled={downloading}
+                      onClick={() => handleDownload('pptx')}
+                      className="flex-1 md:flex-none flex items-center justify-center space-x-2 bg-amber-600 hover:bg-amber-500 text-white font-medium px-4 py-2.5 rounded-lg shadow-md shadow-amber-500/20 text-sm transition-all disabled:opacity-50"
+                    >
+                      {downloading && actionFormat === 'pptx' ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Presentation className="w-4 h-4" />
+                      )}
+                      <span>{downloading && actionFormat === 'pptx' ? 'Preparing PPTX...' : 'Download PPTX'}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* HTML REPORT PREVIEW CONTAINER */}
+              {showPreview && isDataFetched && (
+                selectedReportType === 'vca-postmatch' ? (
+                  <MatchReport
+                    key={selectedMatchId}
+                    ballData={ballData}
+                    matchDetails={matchDetails}
+                  />
+                ) : selectedReportType === 'vca-bowler' ? (
+                  <BowlerReport
+                    ballData={activeAppliedFiltersCount > 0 ? filteredBallData : ballData}
+                    matchDetails={matchDetails}
+                    selectedTeamId={selectedTeamId}
+                    selectedBowlerId={selectedBowlerId}
+                    activeBowler={activeBowler}
+                    activeTeam={activeTeam}
+                    selectedTemplateId={selectedTemplateId}
+                    selectedReportType={selectedReportType}
+                  />
                 ) : (
-                  <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                      Select Batter ({availableBatters.length} Players Available)
-                    </label>
-                    <select
-                      value={selectedBatterId}
-                      onChange={(e) => setSelectedBatterId(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-3 text-sm text-slate-100 focus:outline-none"
-                    >
-                      {availableBatters.map((b) => (
-                        <option key={b.id} value={b.id}>
-                          {b.name} ({b.batStyle})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Action Bar & Export Options */}
-          {isDataFetched && selectedReportType !== 'vca-postmatch' && (
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col md:flex-row items-center justify-between gap-4">
-              <div>
-                <h3 className="text-base font-bold text-white">Report Preview Ready</h3>
-                <p className="text-xs text-slate-400">
-                  Target Batter: <strong className="text-blue-400">{activeBatter.name}</strong> ({activeBatter.batStyle}) | {batterBalls.length} Balls Faced
-                </p>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
-                <button
-                  onClick={() => setShowPreview(!showPreview)}
-                  className="flex-1 md:flex-none flex items-center justify-center space-x-2 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium px-4 py-2.5 rounded-lg border border-slate-700 text-sm transition-all"
-                >
-                  <Eye className="w-4 h-4 text-blue-400" />
-                  <span>{showPreview ? 'Hide HTML Preview' : 'Show HTML Preview'}</span>
-                </button>
-
-                <button
-                  disabled={downloading}
-                  onClick={() => handleDownload('pdf')}
-                  className="flex-1 md:flex-none flex items-center justify-center space-x-2 bg-rose-600 hover:bg-rose-500 text-white font-medium px-4 py-2.5 rounded-lg shadow-md shadow-rose-500/20 text-sm transition-all disabled:opacity-50"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>Download PDF</span>
-                </button>
-
-                <button
-                  disabled={downloading}
-                  onClick={() => handleDownload('pptx')}
-                  className="flex-1 md:flex-none flex items-center justify-center space-x-2 bg-amber-600 hover:bg-amber-500 text-white font-medium px-4 py-2.5 rounded-lg shadow-md shadow-amber-500/20 text-sm transition-all disabled:opacity-50"
-                >
-                  <Presentation className="w-4 h-4" />
-                  <span>Download PPTX</span>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* HTML REPORT PREVIEW CONTAINER */}
-          {showPreview && isDataFetched && (
-            selectedReportType === 'vca-postmatch' ? (
-              <MatchReport
-                key={selectedMatchId}
-                ballData={ballData}
-                matchDetails={matchDetails}
-              />
-            ) : selectedReportType === 'vca-bowler' ? (
-              <BowlerReport
-                ballData={activeAppliedFiltersCount > 0 ? filteredBallData : ballData}
-                matchDetails={matchDetails}
-                selectedTeamId={selectedTeamId}
-                selectedBowlerId={selectedBowlerId}
-                activeBowler={activeBowler}
-                activeTeam={activeTeam}
-                selectedTemplateId={selectedTemplateId}
-                selectedReportType={selectedReportType}
-              />
-            ) : (
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl space-y-6">
-              {/* Slide Navigation Tabs */}
-              <div className="border-b border-slate-800 pb-4 flex items-center justify-between gap-4">
-                <div className="flex space-x-2 overflow-x-auto pb-2 max-w-[700px] scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900 flex-nowrap shrink">
-                  <button
-                    onClick={() => setPreviewSlide(1)}
-                    className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === 1
-                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
-                      : 'bg-slate-800 text-slate-400 hover:text-white'
-                      }`}
-                  >
-                    Slide 1: Cover Page
-                  </button>
-                  <button
-                    onClick={() => setPreviewSlide(2)}
-                    className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === 2
-                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
-                      : 'bg-slate-800 text-slate-400 hover:text-white'
-                      }`}
-                  >
-                    Slide 2: Batter Overview
-                  </button>
-                  <button
-                    onClick={() => setPreviewSlide(3)}
-                    className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === 3
-                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
-                      : 'bg-slate-800 text-slate-400 hover:text-white'
-                      }`}
-                  >
-                    Slide 3: Graphical Summary
-                  </button>
-                  <button
-                    onClick={() => setPreviewSlide(4)}
-                    className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === 4
-                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
-                      : 'bg-slate-800 text-slate-400 hover:text-white'
-                      }`}
-                  >
-                    Slide 4: Overall Graphics
-                  </button>
-                  <button
-                    onClick={() => setPreviewSlide(5)}
-                    className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === 5
-                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
-                      : 'bg-slate-800 text-slate-400 hover:text-white'
-                      }`}
-                  >
-                    Slide 5: Beaten / Uncomfortable / Dismissals
-                  </button>
-                  {phaseWiseStats.phases.map((p, pIdx) => {
-                    const statsSlideNum = 6 + (pIdx * 2);
-                    const gfxSlideNum = 6 + (pIdx * 2) + 1;
-                    return (
-                      <React.Fragment key={pIdx}>
+                  <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl space-y-6">
+                    {/* Slide Navigation Tabs */}
+                    <div className="border-b border-slate-800 pb-4 flex items-center justify-between gap-4">
+                      <div className="flex space-x-2 overflow-x-auto pb-2 max-w-[700px] scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900 flex-nowrap shrink">
                         <button
-                          onClick={() => setPreviewSlide(statsSlideNum)}
-                          className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === statsSlideNum
+                          onClick={() => setPreviewSlide(1)}
+                          className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === 1
                             ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
                             : 'bg-slate-800 text-slate-400 hover:text-white'
                             }`}
                         >
-                          Slide {statsSlideNum}: Phase ({p.phaseName}) Stats
+                          Slide 1: Cover Page
                         </button>
                         <button
-                          onClick={() => setPreviewSlide(gfxSlideNum)}
-                          className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === gfxSlideNum
+                          onClick={() => setPreviewSlide(2)}
+                          className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === 2
                             ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
                             : 'bg-slate-800 text-slate-400 hover:text-white'
                             }`}
                         >
-                          Slide {gfxSlideNum}: Phase ({p.phaseName}) Graphics
+                          Slide 2: Batter Overview
                         </button>
-                      </React.Fragment>
-                    );
-                  })}
-                  {(() => {
-                    const pCount = phaseWiseStats?.phases?.length || 0;
-                    const cTableNum = 6 + (pCount * 2);
-                    const cGfxNum = 6 + (pCount * 2) + 1;
-                    return (
-                      <>
                         <button
-                          onClick={() => setPreviewSlide(cTableNum)}
-                          className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === cTableNum
+                          onClick={() => setPreviewSlide(3)}
+                          className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === 3
                             ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
                             : 'bg-slate-800 text-slate-400 hover:text-white'
                             }`}
                         >
-                          Slide {cTableNum}: Comfort Level Report
+                          Slide 3: Graphical Summary
                         </button>
                         <button
-                          onClick={() => setPreviewSlide(cGfxNum)}
-                          className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === cGfxNum
+                          onClick={() => setPreviewSlide(4)}
+                          className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === 4
                             ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
                             : 'bg-slate-800 text-slate-400 hover:text-white'
                             }`}
                         >
-                          Slide {cGfxNum}: Comfort Level Graphical
+                          Slide 4: Overall Graphics
                         </button>
-                      </>
-                    );
-                  })()}
-                </div>
+                        <button
+                          onClick={() => setPreviewSlide(5)}
+                          className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === 5
+                            ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
+                            : 'bg-slate-800 text-slate-400 hover:text-white'
+                            }`}
+                        >
+                          Slide 5: Beaten / Uncomfortable / Dismissals
+                        </button>
+                        {phaseWiseStats.phases.map((p, pIdx) => {
+                          const statsSlideNum = 6 + (pIdx * 2);
+                          const gfxSlideNum = 6 + (pIdx * 2) + 1;
+                          return (
+                            <React.Fragment key={pIdx}>
+                              <button
+                                onClick={() => setPreviewSlide(statsSlideNum)}
+                                className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === statsSlideNum
+                                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
+                                  : 'bg-slate-800 text-slate-400 hover:text-white'
+                                  }`}
+                              >
+                                Slide {statsSlideNum}: Phase ({p.phaseName}) Stats
+                              </button>
+                              <button
+                                onClick={() => setPreviewSlide(gfxSlideNum)}
+                                className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === gfxSlideNum
+                                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
+                                  : 'bg-slate-800 text-slate-400 hover:text-white'
+                                  }`}
+                              >
+                                Slide {gfxSlideNum}: Phase ({p.phaseName}) Graphics
+                              </button>
+                            </React.Fragment>
+                          );
+                        })}
+                        {(() => {
+                          const pCount = phaseWiseStats?.phases?.length || 0;
+                          const cTableNum = 6 + (pCount * 2);
+                          const cGfxNum = 6 + (pCount * 2) + 1;
+                          return (
+                            <>
+                              <button
+                                onClick={() => setPreviewSlide(cTableNum)}
+                                className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === cTableNum
+                                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
+                                  : 'bg-slate-800 text-slate-400 hover:text-white'
+                                  }`}
+                              >
+                                Slide {cTableNum}: Comfort Level Report
+                              </button>
+                              <button
+                                onClick={() => setPreviewSlide(cGfxNum)}
+                                className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all shrink-0 ${previewSlide === cGfxNum
+                                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
+                                  : 'bg-slate-800 text-slate-400 hover:text-white'
+                                  }`}
+                              >
+                                Slide {cGfxNum}: Comfort Level Graphical
+                              </button>
+                            </>
+                          );
+                        })()}
+                      </div>
 
-                <div className="text-xs text-slate-400 shrink-0">
-                  Profile: <span className="font-semibold text-blue-400 uppercase">{selectedTemplateId}</span> | Report: <span className="font-semibold text-blue-400">{selectedReportType}</span>
-                </div>
-              </div>
-
-              {/* Active Tab View Box */}
-              <div className="w-full flex justify-center py-4 bg-slate-950 rounded-xl overflow-x-auto">
-                {previewSlide === 1 && (
-                  <div
-                    id="slide-1-node"
-                    className="relative w-[900px] h-[525px] rounded-lg shadow-2xl flex flex-col items-center justify-center p-12 overflow-hidden select-none"
-                    style={{ backgroundColor: '#f6f4eb', color: '#1a1a1a', fontFamily: 'sans-serif' }}
-                  >
-                    {/* Top-Left Black L-Corner Frame */}
-                    <div className="absolute top-8 left-8 w-48 h-36 border-t-[14px] border-l-[14px] border-slate-950 pointer-events-none" />
-
-                    {/* Bottom-Right Black L-Corner Frame */}
-                    <div className="absolute bottom-8 right-8 w-48 h-36 border-b-[14px] border-r-[14px] border-slate-950 pointer-events-none" />
-
-                    {/* Main Content Group */}
-                    <div className="text-center z-10 space-y-6 max-w-2xl px-6">
-                      <h1 className="text-5xl font-extrabold tracking-wide uppercase text-slate-950">
-                        {activeBatter.name}
-                      </h1>
-
-                      <div className="space-y-1.5 text-center">
-                        <p className="text-lg font-bold italic uppercase tracking-wider text-slate-800">
-                          {activeBatter.batStyle}
-                        </p>
-                        <p className="text-base font-bold italic uppercase tracking-wider text-slate-800">
-                          {activeTeam.name}
-                        </p>
-                        <p className="text-base font-bold italic uppercase tracking-wider text-slate-800">
-                          IN {matchDetails?.CompFullName || matchDetails?.CompPrefix || 'COMPETITION SEASON'}
-                        </p>
+                      <div className="text-xs text-slate-400 shrink-0">
+                        Profile: <span className="font-semibold text-blue-400 uppercase">{selectedTemplateId}</span> | Report: <span className="font-semibold text-blue-400">{selectedReportType}</span>
                       </div>
                     </div>
-                  </div>
-                )}
 
-                {/* SLIDE 2: BATTING STATS TABLE (Cream Theme, Left Stripe, Clean Table) */}
-                {previewSlide === 2 && (
-                  <div
-                    id="slide-2-node"
-                    className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg shadow-2xl p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
-                    style={{ fontFamily: 'sans-serif' }}
-                  >
-                    {/* Left Black Accent Stripe */}
-                    <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
-
-                    <div className="pl-6 flex-1 flex flex-col justify-between">
-                      {/* Header Title */}
-                      <div>
-                        <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
-                          {slide2Title}
-                        </h1>
-
-                        <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                          <span className="text-slate-950 text-sm">■</span> BATTING STATS
-                        </div>
-                      </div>
-
-                      {/* Player Summary Header Bar Above Table */}
-                      <div className="w-full bg-slate-900 text-white px-5 py-3 rounded-t-lg border-b border-slate-700 flex justify-between items-center shadow-md">
-                        <div>
-                          <h2 className="text-base font-extrabold uppercase text-white tracking-wide">{activeBatter.name}</h2>
-                          <p className="text-[11px] text-slate-400">Consolidated player summary</p>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-blue-950/90 text-blue-300 border border-blue-600/50">
-                            Inns {inningsWiseStats.total.innCount}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-amber-950/90 text-amber-300 border border-amber-600/50">
-                            Runs {inningsWiseStats.total.runs}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-emerald-950/90 text-emerald-300 border border-emerald-600/50">
-                            Balls {inningsWiseStats.total.balls}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-purple-950/90 text-purple-300 border border-purple-600/50">
-                            AVG {inningsWiseStats.total.avg}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-cyan-950/90 text-cyan-300 border border-cyan-600/50">
-                            S/R {inningsWiseStats.total.str}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Clean Innings Stats Table */}
-                      <div className="flex-1 flex flex-col justify-start">
-                        <div className="w-full overflow-hidden rounded-b-lg border-x border-b border-slate-300 shadow-sm">
-                          <table className="w-full text-left border-collapse text-xs font-sans">
-                            <thead>
-                              <tr className="bg-slate-900 text-white uppercase tracking-wider text-[11px]">
-                                <th className="py-3 px-4 font-bold">Inning</th>
-                                <th className="py-3 px-4 text-center font-bold">INNING</th>
-                                <th className="py-3 px-4 text-center font-bold">RUNS</th>
-                                <th className="py-3 px-4 text-center font-bold">BALLS</th>
-                                <th className="py-3 px-4 text-center font-bold">N.O</th>
-                                <th className="py-3 px-4 text-center font-bold">STR</th>
-                                <th className="py-3 px-4 text-center font-bold">AVG</th>
-                                <th className="py-3 px-4 text-center font-bold">50'S</th>
-                                <th className="py-3 px-4 text-center font-bold">100'S</th>
-                              </tr>
-                            </thead>
-
-                            <tbody className="bg-white divide-y divide-slate-200 text-slate-800 font-semibold">
-                              {inningsWiseStats.rows.length === 0 ? (
-                                <tr>
-                                  <td colSpan="9" className="py-6 text-center text-slate-500 font-normal">
-                                    No innings data recorded for {activeBatter.name}
-                                  </td>
-                                </tr>
-                              ) : (
-                                inningsWiseStats.rows.map((r, idx) => (
-                                  <tr key={idx} className="hover:bg-slate-50 transition-colors">
-                                    <td className="py-3.5 px-4 font-bold text-slate-950">{r.label}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.innCount}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.runs}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.balls}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.no}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.str}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.avg}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.fifties}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.hundreds}</td>
-                                  </tr>
-                                ))
-                              )}
-                              {/* Total Summary Row */}
-                              <tr className="bg-slate-100 font-extrabold text-slate-950 border-t-2 border-slate-400">
-                                <td className="py-4 px-4 uppercase">{inningsWiseStats.total.label}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.innCount}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.runs}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.balls}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.no}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.str}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.avg}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.fifties}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.hundreds}</td>
-                              </tr>
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-
-                {previewSlide === 3 && (
-                  <div
-                    id="slide-3-node"
-                    className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg shadow-2xl p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
-                    style={{ fontFamily: 'sans-serif' }}
-                  >
-                    {/* Left Black Accent Stripe */}
-                    <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
-
-                    <div className="pl-6 flex-1 flex flex-col justify-between">
-                      {/* Header Title */}
-                      <div>
-                        <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
-                          {slide2Title}
-                        </h1>
-
-                        <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                          <span className="text-slate-950 text-sm">■</span> BATTING STATS GRAPHICAL REPRESENTATION
-                        </div>
-                      </div>
-
-                      {/* Player Summary Header Bar Above Chart */}
-                      <div className="w-full bg-slate-900 text-white px-5 py-3 rounded-t-lg border-b border-slate-700 flex justify-between items-center shadow-md">
-                        <div>
-                          <h2 className="text-base font-extrabold uppercase text-white tracking-wide">{activeBatter.name}</h2>
-                          <p className="text-[11px] text-slate-400">Consolidated graphical summary</p>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-blue-950/90 text-blue-300 border border-blue-600/50">
-                            Inns {inningsWiseStats.total.innCount}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-amber-950/90 text-amber-300 border border-amber-600/50">
-                            Runs {inningsWiseStats.total.runs}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-emerald-950/90 text-emerald-300 border border-emerald-600/50">
-                            Balls {inningsWiseStats.total.balls}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-purple-950/90 text-purple-300 border border-purple-600/50">
-                            AVG {inningsWiseStats.total.avg}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-cyan-950/90 text-cyan-300 border border-cyan-600/50">
-                            S/R {inningsWiseStats.total.str}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Innings Wise Graphical Bar Chart Visualization */}
-                      <div className="flex-1 bg-white rounded-b-lg border-x border-b border-slate-300 p-6 flex flex-col justify-between shadow-sm">
-                        <h3 className="text-xs font-bold text-slate-800 uppercase tracking-widest mb-2">INNING WISE DATA</h3>
-
-                        <div className="flex-1 flex items-end justify-center space-x-12 pb-4 pt-2 px-8 border-b border-dashed border-slate-300 relative">
-                          {/* Y-Axis Value Indicators */}
-                          <div className="absolute left-2 top-0 bottom-6 flex flex-col justify-between text-[10px] font-bold text-slate-400">
-                            <span>50</span>
-                            <span>40</span>
-                            <span>30</span>
-                            <span>20</span>
-                            <span>10</span>
-                            <span>0</span>
-                          </div>
-
-                          {inningsWiseStats.rows.length === 0 ? (
-                            <div className="text-xs text-slate-500 py-8">No innings data recorded for chart</div>
-                          ) : (
-                            inningsWiseStats.rows.map((r, idx) => {
-                              const runPx = Math.max(16, Math.min(130, Math.round((r.runs / 60) * 130)));
-                              const avgVal = parseFloat(r.avg) || 0;
-                              const avgPx = Math.max(16, Math.min(130, Math.round((avgVal / 60) * 130)));
-
-                              return (
-                                <div key={idx} className="flex flex-col items-center">
-                                  <div className="flex items-end space-x-2 h-[140px]">
-                                    {/* Runs Bar (Green) */}
-                                    <div className="flex flex-col items-center justify-end h-full">
-                                      <span className="text-[10px] font-extrabold text-slate-800 mb-1">{r.runs}</span>
-                                      <div
-                                        className="w-10 bg-lime-600 rounded-t-sm shadow-sm"
-                                        style={{ height: `${runPx}px` }}
-                                      />
-                                    </div>
-
-                                    {/* Avg Bar (Brown) */}
-                                    <div className="flex flex-col items-center justify-end h-full">
-                                      <span className="text-[10px] font-extrabold text-slate-800 mb-1">{r.avg}</span>
-                                      <div
-                                        className="w-10 bg-amber-600 rounded-t-sm shadow-sm"
-                                        style={{ height: `${avgPx}px` }}
-                                      />
-                                    </div>
-                                  </div>
-                                  <span className="text-xs font-bold text-slate-900 mt-2 uppercase">{r.label}</span>
-                                </div>
-                              );
-                            })
-                          )}
-                        </div>
-
-                        {/* Chart Legend */}
-                        <div className="flex justify-center items-center space-x-6 pt-3 text-xs font-bold text-slate-700">
-                          <div className="flex items-center space-x-2">
-                            <span className="w-3 h-3 bg-lime-600 rounded-xs" />
-                            <span>Runs</span>
-                          </div>
-                          <div className="flex items-center space-x-2">
-                            <span className="w-3 h-3 bg-amber-600 rounded-xs" />
-                            <span>Avg</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* SLIDE 4: OVERALL GRAPHICS (Wagon Wheel Region & Pitch Map SVGs) */}
-                {previewSlide === 4 && (
-                  <div
-                    id="slide-4-node"
-                    className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg shadow-2xl p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
-                    style={{ fontFamily: 'sans-serif' }}
-                  >
-                    {/* Left Black Accent Stripe */}
-                    <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
-
-                    <div className="pl-6 flex-1 flex flex-col justify-between">
-                      {/* Header Title */}
-                      <div>
-                        <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
-                          {slide2Title}
-                        </h1>
-
-                        <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                          <span className="text-slate-950 text-sm">■</span> OVER ALL
-                        </div>
-                      </div>
-
-                      {/* Side-by-Side Graphics Container */}
-                      <div className="w-full h-[340px] bg-[#0a1324] rounded-xl p-3 border border-slate-800 flex items-center justify-between gap-3 relative overflow-hidden">
-                        {graphicsData.loading ? (
-                          <div className="w-full text-center text-xs text-blue-400 animate-pulse font-medium">Fetching Graphics SVGs from Cricket-21...</div>
-                        ) : (
-                          <>
-                            {/* Wagon Wheel Region SVG */}
-                            <div className="w-1/2 h-full flex items-center justify-center overflow-hidden">
-                              {graphicsData.wwregionSvg ? (
-                                <div
-                                  className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
-                                  dangerouslySetInnerHTML={{ __html: graphicsData.wwregionSvg }}
-                                />
-                              ) : (
-                                <div className="text-xs text-slate-500">No Wagon Wheel Region SVG data</div>
-                              )}
-                            </div>
-
-                            {/* Pitch Map SVG */}
-                            <div className="w-1/2 h-full flex items-center justify-center overflow-hidden border-l border-slate-800/80 pl-3">
-                              {graphicsData.pitchmapSvg ? (
-                                <div
-                                  className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
-                                  dangerouslySetInnerHTML={{ __html: graphicsData.pitchmapSvg }}
-                                />
-                              ) : (
-                                <div className="text-xs text-slate-500">No Pitch Map SVG data</div>
-                              )}
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* SLIDE 5: BEATEN, UNCOMFORTABLE & DISMISSAL AREAS */}
-                {previewSlide === 5 && (
-                  <div
-                    id="slide-5-node"
-                    className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg shadow-2xl p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
-                    style={{ fontFamily: 'sans-serif' }}
-                  >
-                    {/* Left Black Accent Stripe */}
-                    <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
-
-                    <div className="pl-6 flex-1 flex flex-col justify-between">
-                      {/* Header Title */}
-                      <div>
-                        <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
-                          {slide2Title}
-                        </h1>
-
-                        <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                          <span className="text-slate-950 text-sm">■</span> BEATEN , UNCOMFORTABLE & DISMISSAL AREAS
-                        </div>
-                      </div>
-
-                      {/* Graphics Container */}
-                      <div className="w-full h-[340px] bg-[#0a1324] rounded-xl p-3 border border-slate-800 flex items-center justify-center relative overflow-hidden">
-                        {graphicsData.loading ? (
-                          <div className="w-full text-center text-xs text-blue-400 animate-pulse font-medium">Fetching Beaten Pitchmap SVG from Cricket-21...</div>
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center overflow-hidden">
-                            {graphicsData.beatenPitchmapSvg ? (
-                              <div
-                                className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
-                                dangerouslySetInnerHTML={{ __html: graphicsData.beatenPitchmapSvg }}
-                              />
-                            ) : (
-                              <div className="text-xs text-slate-500">No Beaten/Uncomfortable/Dismissal Pitch Map SVG data</div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* SLIDE 6+: PHASE WISE STATS & GRAPHICS PAIRS */}
-                {phaseWiseStats.phases.map((p, pIdx) => {
-                  const statsSlideNum = 6 + (pIdx * 2);
-                  const gfxSlideNum = 6 + (pIdx * 2) + 1;
-                  const pGfx = graphicsData.phaseGraphicsMap[pIdx];
-
-                  return (
-                    <React.Fragment key={pIdx}>
-                      {/* STATS TABLE SLIDE */}
-                      {previewSlide === statsSlideNum && (
+                    {/* Active Tab View Box */}
+                    <div className="w-full flex justify-center py-4 bg-slate-950 rounded-xl overflow-x-auto">
+                      {previewSlide === 1 && (
                         <div
-                          id={`slide-6-node-${pIdx}`}
-                          className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg shadow-2xl p-8 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
-                          style={{ fontFamily: 'sans-serif' }}
+                          id="slide-1-node"
+                          className="relative w-[900px] h-[525px] rounded-lg shadow-2xl flex flex-col items-center justify-center p-12 overflow-hidden select-none"
+                          style={{ backgroundColor: '#f6f4eb', color: '#1a1a1a', fontFamily: 'sans-serif' }}
                         >
-                          <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+                          {/* Top-Left Black L-Corner Frame */}
+                          <div className="absolute top-8 left-8 w-48 h-36 border-t-[14px] border-l-[14px] border-slate-950 pointer-events-none" />
 
-                          <div className="pl-6 flex-1 flex flex-col justify-between">
-                            <div>
-                              <h1 className="text-xl font-extrabold uppercase text-slate-950 tracking-tight">
-                                {slide2Title}
-                              </h1>
+                          {/* Bottom-Right Black L-Corner Frame */}
+                          <div className="absolute bottom-8 right-8 w-48 h-36 border-b-[14px] border-r-[14px] border-slate-950 pointer-events-none" />
 
-                              <div className="text-sm font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-2 mb-3">
-                                <span className="text-slate-950 text-xs">■</span> PHASE WISE – ( {p.phaseName} )
-                              </div>
-                            </div>
+                          {/* Main Content Group */}
+                          <div className="text-center z-10 space-y-6 max-w-2xl px-6">
+                            <h1 className="text-5xl font-extrabold tracking-wide uppercase text-slate-950">
+                              {activeBatter.name}
+                            </h1>
 
-                            <div className="w-full bg-[#0a1b2a] rounded-xl p-4 text-white border border-slate-800 shadow-lg flex items-center gap-4">
-                              <div className="flex flex-col items-center justify-center space-y-1">
-                                <div className="w-14 h-14 rounded-full bg-slate-700/60 border-2 border-emerald-400 flex items-center justify-center text-slate-300">
-                                  <User className="w-8 h-8" />
-                                </div>
-                                <span className="text-[10px] font-extrabold uppercase tracking-wide text-emerald-300 text-center max-w-[100px] truncate">
-                                  {activeBatter.name}
-                                </span>
-                              </div>
-
-                              <div className="flex-1 grid grid-cols-7 gap-2 text-center border-l border-slate-700/80 pl-4">
-                                <div className="flex flex-col items-center">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">Inns</span>
-                                  <span className="text-base font-extrabold text-white">{p.summary.inns}</span>
-                                </div>
-                                <div className="flex flex-col items-center">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">Runs</span>
-                                  <span className="text-base font-extrabold text-white">{p.summary.runs}</span>
-                                </div>
-                                <div className="flex flex-col items-center">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">Balls</span>
-                                  <span className="text-base font-extrabold text-white">{p.summary.balls}</span>
-                                </div>
-                                <div className="flex flex-col items-center">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">Avg</span>
-                                  <span className="text-base font-extrabold text-white">{p.summary.avg}</span>
-                                </div>
-                                <div className="flex flex-col items-center">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">S/R</span>
-                                  <span className="text-base font-extrabold text-white">{p.summary.str}</span>
-                                </div>
-                                <div className="flex flex-col items-center">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">SB</span>
-                                  <span className="text-base font-extrabold text-white">{p.summary.sb}</span>
-                                </div>
-                                <div className="flex flex-col items-center">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">Dots</span>
-                                  <span className="text-base font-extrabold text-white">{p.summary.dots}</span>
-                                </div>
-
-                                <div className="flex flex-col items-center pt-1 border-t border-slate-800">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">1s</span>
-                                  <span className="text-sm font-extrabold text-blue-300">{p.summary.ones}</span>
-                                </div>
-                                <div className="flex flex-col items-center pt-1 border-t border-slate-800">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">2s</span>
-                                  <span className="text-sm font-extrabold text-blue-300">{p.summary.twos}</span>
-                                </div>
-                                <div className="flex flex-col items-center pt-1 border-t border-slate-800">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">Fours</span>
-                                  <span className="text-sm font-extrabold text-lime-400">{p.summary.fours}</span>
-                                </div>
-                                <div className="flex flex-col items-center pt-1 border-t border-slate-800">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">Sixers</span>
-                                  <span className="text-sm font-extrabold text-amber-400">{p.summary.sixes}</span>
-                                </div>
-                                <div className="flex flex-col items-center pt-1 border-t border-slate-800">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">30+</span>
-                                  <span className="text-sm font-extrabold text-purple-300">{p.summary.thirtysPlus}</span>
-                                </div>
-                                <div className="flex flex-col items-center pt-1 border-t border-slate-800">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">50+</span>
-                                  <span className="text-sm font-extrabold text-cyan-300">{p.summary.fiftysPlus}</span>
-                                </div>
-                                <div className="flex flex-col items-center pt-1 border-t border-slate-800">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">100+</span>
-                                  <span className="text-sm font-extrabold text-emerald-400">{p.summary.hundredsPlus}</span>
-                                </div>
-                              </div>
-                            </div>
-
-                            <div className="w-full overflow-hidden rounded-xl border border-slate-800 bg-[#071320] shadow-md mt-3">
-                              <table className="w-full text-left border-collapse text-[11px] font-sans text-slate-200">
-                                <thead>
-                                  <tr className="bg-[#0f2438] text-slate-300 uppercase tracking-wider text-[10px] border-b border-slate-800">
-                                    <th className="py-2.5 px-3 font-bold">Match</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">Inns</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">Runs</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">Balls</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">S/R</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">Dots</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">1s</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">2s</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">3s</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">Fours</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">Sixers</th>
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-800/80 font-semibold">
-                                  {p.matchRows.map((m, mIdx) => (
-                                    <tr key={mIdx} className="hover:bg-slate-800/40 transition-colors">
-                                      <td className="py-2.5 px-3 text-cyan-300 font-bold">
-                                        {m.matchName}
-                                      </td>
-                                      <td className="py-2.5 px-2 text-center text-slate-300">{m.innCount}</td>
-                                      <td className="py-2.5 px-2 text-center text-cyan-300 font-extrabold">{m.runs}</td>
-                                      <td className="py-2.5 px-2 text-center text-cyan-300 font-extrabold">{m.balls}</td>
-                                      <td className="py-2.5 px-2 text-center text-slate-300">{m.str}</td>
-                                      <td className="py-2.5 px-2 text-center text-emerald-400 font-bold">{m.dots}</td>
-                                      <td className="py-2.5 px-2 text-center text-slate-300">{m.ones}</td>
-                                      <td className="py-2.5 px-2 text-center text-slate-300">{m.twos}</td>
-                                      <td className="py-2.5 px-2 text-center text-slate-300">{m.threes}</td>
-                                      <td className="py-2.5 px-2 text-center text-slate-300">{m.fours}</td>
-                                      <td className="py-2.5 px-2 text-center text-slate-300">{m.sixes}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
+                            <div className="space-y-1.5 text-center">
+                              <p className="text-lg font-bold italic uppercase tracking-wider text-slate-800">
+                                {activeBatter.batStyle}
+                              </p>
+                              <p className="text-base font-bold italic uppercase tracking-wider text-slate-800">
+                                {activeTeam.name}
+                              </p>
+                              <p className="text-base font-bold italic uppercase tracking-wider text-slate-800">
+                                IN {matchDetails?.CompFullName || matchDetails?.CompPrefix || 'COMPETITION SEASON'}
+                              </p>
                             </div>
                           </div>
                         </div>
                       )}
 
-                      {/* GRAPHICS SLIDE */}
-                      {previewSlide === gfxSlideNum && (
+                      {/* SLIDE 2: BATTING STATS TABLE (Cream Theme, Left Stripe, Clean Table) */}
+                      {previewSlide === 2 && (
                         <div
-                          id={`slide-6-gfx-node-${pIdx}`}
+                          id="slide-2-node"
                           className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg shadow-2xl p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
                           style={{ fontFamily: 'sans-serif' }}
                         >
+                          {/* Left Black Accent Stripe */}
                           <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
 
                           <div className="pl-6 flex-1 flex flex-col justify-between">
+                            {/* Header Title */}
                             <div>
                               <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
                                 {slide2Title}
                               </h1>
 
                               <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                                <span className="text-slate-950 text-sm">■</span> PHASE WISE – ( {p.phaseName} )
+                                <span className="text-slate-950 text-sm">■</span> BATTING STATS
                               </div>
                             </div>
 
+                            {/* Player Summary Header Bar Above Table */}
+                            <div className="w-full bg-slate-900 text-white px-5 py-3 rounded-t-lg border-b border-slate-700 flex justify-between items-center shadow-md">
+                              <div>
+                                <h2 className="text-base font-extrabold uppercase text-white tracking-wide">{activeBatter.name}</h2>
+                                <p className="text-[11px] text-slate-400">Consolidated player summary</p>
+                              </div>
+                              <div className="flex items-center space-x-2">
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-blue-950/90 text-blue-300 border border-blue-600/50">
+                                  Inns {inningsWiseStats.total.innCount}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-amber-950/90 text-amber-300 border border-amber-600/50">
+                                  Runs {inningsWiseStats.total.runs}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-emerald-950/90 text-emerald-300 border border-emerald-600/50">
+                                  Balls {inningsWiseStats.total.balls}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-purple-950/90 text-purple-300 border border-purple-600/50">
+                                  AVG {inningsWiseStats.total.avg}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-cyan-950/90 text-cyan-300 border border-cyan-600/50">
+                                  S/R {inningsWiseStats.total.str}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Clean Innings Stats Table */}
+                            <div className="flex-1 flex flex-col justify-start">
+                              <div className="w-full overflow-hidden rounded-b-lg border-x border-b border-slate-300 shadow-sm">
+                                <table className="w-full text-left border-collapse text-xs font-sans">
+                                  <thead>
+                                    <tr className="bg-slate-900 text-white uppercase tracking-wider text-[11px]">
+                                      <th className="py-3 px-4 font-bold">Inning</th>
+                                      <th className="py-3 px-4 text-center font-bold">INNING</th>
+                                      <th className="py-3 px-4 text-center font-bold">RUNS</th>
+                                      <th className="py-3 px-4 text-center font-bold">BALLS</th>
+                                      <th className="py-3 px-4 text-center font-bold">N.O</th>
+                                      <th className="py-3 px-4 text-center font-bold">STR</th>
+                                      <th className="py-3 px-4 text-center font-bold">AVG</th>
+                                      <th className="py-3 px-4 text-center font-bold">50'S</th>
+                                      <th className="py-3 px-4 text-center font-bold">100'S</th>
+                                    </tr>
+                                  </thead>
+
+                                  <tbody className="bg-white divide-y divide-slate-200 text-slate-800 font-semibold">
+                                    {inningsWiseStats.rows.length === 0 ? (
+                                      <tr>
+                                        <td colSpan="9" className="py-6 text-center text-slate-500 font-normal">
+                                          No innings data recorded for {activeBatter.name}
+                                        </td>
+                                      </tr>
+                                    ) : (
+                                      inningsWiseStats.rows.map((r, idx) => (
+                                        <tr key={idx} className="hover:bg-slate-50 transition-colors">
+                                          <td className="py-3.5 px-4 font-bold text-slate-950">{r.label}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.innCount}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.runs}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.balls}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.no}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.str}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.avg}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.fifties}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.hundreds}</td>
+                                        </tr>
+                                      ))
+                                    )}
+                                    {/* Total Summary Row */}
+                                    <tr className="bg-slate-100 font-extrabold text-slate-950 border-t-2 border-slate-400">
+                                      <td className="py-4 px-4 uppercase">{inningsWiseStats.total.label}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.innCount}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.runs}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.balls}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.no}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.str}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.avg}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.fifties}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.hundreds}</td>
+                                    </tr>
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+
+                      {previewSlide === 3 && (
+                        <div
+                          id="slide-3-node"
+                          className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg shadow-2xl p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
+                          style={{ fontFamily: 'sans-serif' }}
+                        >
+                          {/* Left Black Accent Stripe */}
+                          <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+
+                          <div className="pl-6 flex-1 flex flex-col justify-between">
+                            {/* Header Title */}
+                            <div>
+                              <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
+                                {slide2Title}
+                              </h1>
+
+                              <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
+                                <span className="text-slate-950 text-sm">■</span> BATTING STATS GRAPHICAL REPRESENTATION
+                              </div>
+                            </div>
+
+                            {/* Player Summary Header Bar Above Chart */}
+                            <div className="w-full bg-slate-900 text-white px-5 py-3 rounded-t-lg border-b border-slate-700 flex justify-between items-center shadow-md">
+                              <div>
+                                <h2 className="text-base font-extrabold uppercase text-white tracking-wide">{activeBatter.name}</h2>
+                                <p className="text-[11px] text-slate-400">Consolidated graphical summary</p>
+                              </div>
+                              <div className="flex items-center space-x-2">
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-blue-950/90 text-blue-300 border border-blue-600/50">
+                                  Inns {inningsWiseStats.total.innCount}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-amber-950/90 text-amber-300 border border-amber-600/50">
+                                  Runs {inningsWiseStats.total.runs}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-emerald-950/90 text-emerald-300 border border-emerald-600/50">
+                                  Balls {inningsWiseStats.total.balls}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-purple-950/90 text-purple-300 border border-purple-600/50">
+                                  AVG {inningsWiseStats.total.avg}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-cyan-950/90 text-cyan-300 border border-cyan-600/50">
+                                  S/R {inningsWiseStats.total.str}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Innings Wise Graphical Bar Chart Visualization */}
+                            <div className="flex-1 bg-white rounded-b-lg border-x border-b border-slate-300 p-6 flex flex-col justify-between shadow-sm">
+                              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-widest mb-2">INNING WISE DATA</h3>
+
+                              <div className="flex-1 flex items-end justify-center space-x-12 pb-4 pt-2 px-8 border-b border-dashed border-slate-300 relative">
+                                {/* Y-Axis Value Indicators */}
+                                <div className="absolute left-2 top-0 bottom-6 flex flex-col justify-between text-[10px] font-bold text-slate-400">
+                                  <span>50</span>
+                                  <span>40</span>
+                                  <span>30</span>
+                                  <span>20</span>
+                                  <span>10</span>
+                                  <span>0</span>
+                                </div>
+
+                                {inningsWiseStats.rows.length === 0 ? (
+                                  <div className="text-xs text-slate-500 py-8">No innings data recorded for chart</div>
+                                ) : (
+                                  inningsWiseStats.rows.map((r, idx) => {
+                                    const runPx = Math.max(16, Math.min(130, Math.round((r.runs / 60) * 130)));
+                                    const avgVal = parseFloat(r.avg) || 0;
+                                    const avgPx = Math.max(16, Math.min(130, Math.round((avgVal / 60) * 130)));
+
+                                    return (
+                                      <div key={idx} className="flex flex-col items-center">
+                                        <div className="flex items-end space-x-2 h-[140px]">
+                                          {/* Runs Bar (Green) */}
+                                          <div className="flex flex-col items-center justify-end h-full">
+                                            <span className="text-[10px] font-extrabold text-slate-800 mb-1">{r.runs}</span>
+                                            <div
+                                              className="w-10 bg-lime-600 rounded-t-sm shadow-sm"
+                                              style={{ height: `${runPx}px` }}
+                                            />
+                                          </div>
+
+                                          {/* Avg Bar (Brown) */}
+                                          <div className="flex flex-col items-center justify-end h-full">
+                                            <span className="text-[10px] font-extrabold text-slate-800 mb-1">{r.avg}</span>
+                                            <div
+                                              className="w-10 bg-amber-600 rounded-t-sm shadow-sm"
+                                              style={{ height: `${avgPx}px` }}
+                                            />
+                                          </div>
+                                        </div>
+                                        <span className="text-xs font-bold text-slate-900 mt-2 uppercase">{r.label}</span>
+                                      </div>
+                                    );
+                                  })
+                                )}
+                              </div>
+
+                              {/* Chart Legend */}
+                              <div className="flex justify-center items-center space-x-6 pt-3 text-xs font-bold text-slate-700">
+                                <div className="flex items-center space-x-2">
+                                  <span className="w-3 h-3 bg-lime-600 rounded-xs" />
+                                  <span>Runs</span>
+                                </div>
+                                <div className="flex items-center space-x-2">
+                                  <span className="w-3 h-3 bg-amber-600 rounded-xs" />
+                                  <span>Avg</span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* SLIDE 4: OVERALL GRAPHICS (Wagon Wheel Region & Pitch Map SVGs) */}
+                      {previewSlide === 4 && (
+                        <div
+                          id="slide-4-node"
+                          className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg shadow-2xl p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
+                          style={{ fontFamily: 'sans-serif' }}
+                        >
+                          {/* Left Black Accent Stripe */}
+                          <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+
+                          <div className="pl-6 flex-1 flex flex-col justify-between">
+                            {/* Header Title */}
+                            <div>
+                              <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
+                                {slide2Title}
+                              </h1>
+
+                              <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
+                                <span className="text-slate-950 text-sm">■</span> OVER ALL
+                              </div>
+                            </div>
+
+                            {/* Side-by-Side Graphics Container */}
                             <div className="w-full h-[340px] bg-[#0a1324] rounded-xl p-3 border border-slate-800 flex items-center justify-between gap-3 relative overflow-hidden">
                               {graphicsData.loading ? (
-                                <div className="w-full text-center text-xs text-blue-400 animate-pulse font-medium">Fetching Phase Graphics SVGs from Cricket-21...</div>
+                                <div className="w-full text-center text-xs text-blue-400 animate-pulse font-medium">Fetching Graphics SVGs from Cricket-21...</div>
                               ) : (
                                 <>
+                                  {/* Wagon Wheel Region SVG */}
                                   <div className="w-1/2 h-full flex items-center justify-center overflow-hidden">
-                                    {pGfx?.wwregionSvg ? (
+                                    {graphicsData.wwregionSvg ? (
                                       <div
                                         className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
-                                        dangerouslySetInnerHTML={{ __html: pGfx.wwregionSvg }}
+                                        dangerouslySetInnerHTML={{ __html: graphicsData.wwregionSvg }}
                                       />
                                     ) : (
                                       <div className="text-xs text-slate-500">No Wagon Wheel Region SVG data</div>
                                     )}
                                   </div>
 
+                                  {/* Pitch Map SVG */}
                                   <div className="w-1/2 h-full flex items-center justify-center overflow-hidden border-l border-slate-800/80 pl-3">
-                                    {pGfx?.pitchmapSvg ? (
+                                    {graphicsData.pitchmapSvg ? (
                                       <div
                                         className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
-                                        dangerouslySetInnerHTML={{ __html: pGfx.pitchmapSvg }}
+                                        dangerouslySetInnerHTML={{ __html: graphicsData.pitchmapSvg }}
                                       />
                                     ) : (
                                       <div className="text-xs text-slate-500">No Pitch Map SVG data</div>
@@ -2887,637 +3031,547 @@ export default function App() {
                           </div>
                         </div>
                       )}
-                    </React.Fragment>
-                  );
-                })}
 
-                {/* SLIDE 7: COMFORT LEVEL REPORT (Table View) */}
-                {(() => {
-                  const pCount = phaseWiseStats?.phases?.length || 0;
-                  const cTableNum = 6 + (pCount * 2);
-                  const cGfxNum = 6 + (pCount * 2) + 1;
-
-                  return (
-                    <>
-                      {previewSlide === cTableNum && (
+                      {/* SLIDE 5: BEATEN, UNCOMFORTABLE & DISMISSAL AREAS */}
+                      {previewSlide === 5 && (
                         <div
-                          id="slide-comfort-node"
+                          id="slide-5-node"
                           className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg shadow-2xl p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
                           style={{ fontFamily: 'sans-serif' }}
                         >
+                          {/* Left Black Accent Stripe */}
                           <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
 
                           <div className="pl-6 flex-1 flex flex-col justify-between">
+                            {/* Header Title */}
                             <div>
                               <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
                                 {slide2Title}
                               </h1>
 
                               <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                                <span className="text-slate-950 text-sm">■</span> COMFORT LEVEL REPORT
+                                <span className="text-slate-950 text-sm">■</span> BEATEN , UNCOMFORTABLE & DISMISSAL AREAS
                               </div>
                             </div>
 
-                            <div className="w-full bg-[#071320] border border-slate-800 rounded-xl p-4 shadow-xl flex-1 flex flex-col justify-between">
-                              <div>
-                                <div className="text-xs font-extrabold uppercase text-white tracking-wider">COMFORT LEVEL</div>
-                                <div className="text-[10px] text-cyan-400/80 mb-3">Player-wise batting comfort level against bowling type</div>
-
-                                {/* Summary Header Banner */}
-                                <div className="w-full bg-[#0d1d2e] border border-slate-800 rounded-lg p-3 mb-4 flex items-center justify-between">
-                                  <div>
-                                    <div className="text-sm font-extrabold text-white uppercase">{activeBatter.name}</div>
-                                    <div className="text-[10px] text-slate-400">Filtered batting comfort summary</div>
-                                  </div>
-
-                                  <div className="flex items-center gap-2">
-                                    <span className="bg-amber-950/80 border border-amber-500/60 text-amber-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      Runs {comfortLevelStats.total.runs}
-                                    </span>
-                                    <span className="bg-emerald-950/80 border border-emerald-500/60 text-emerald-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      WKT {comfortLevelStats.total.wkt}
-                                    </span>
-                                    <span className="bg-cyan-950/80 border border-cyan-500/60 text-cyan-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      STR {comfortLevelStats.total.str}
-                                    </span>
-                                    <span className="bg-indigo-950/80 border border-indigo-500/60 text-indigo-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      AVG {comfortLevelStats.total.avg}
-                                    </span>
-                                  </div>
-                                </div>
-
-                                <div className="text-xs font-bold text-white uppercase mb-2">COMFORT LEVEL AGAINST BOWLING TYPE</div>
-
-                                {/* Table */}
-                                <div className="w-full overflow-hidden rounded-lg border border-slate-800 bg-[#0b1726]">
-                                  <table className="w-full text-left border-collapse text-[11px] font-sans text-slate-200">
-                                    <thead>
-                                      <tr className="bg-[#0f2438] text-slate-300 uppercase tracking-wider text-[10px] border-b border-slate-800">
-                                        <th className="py-2.5 px-4 font-bold">TYPE</th>
-                                        <th className="py-2.5 px-3 text-center font-bold">OVERS</th>
-                                        <th className="py-2.5 px-3 text-center font-bold">RUNS</th>
-                                        <th className="py-2.5 px-3 text-center font-bold">WKT</th>
-                                        <th className="py-2.5 px-3 text-center font-bold">STR</th>
-                                        <th className="py-2.5 px-3 text-center font-bold">AVG</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-800/80 font-semibold">
-                                      {comfortLevelStats.rows.map((r, rIdx) => (
-                                        <tr key={rIdx} className="hover:bg-slate-800/40 transition-colors">
-                                          <td className="py-2.5 px-4 text-cyan-300 font-bold">{r.type}</td>
-                                          <td className="py-2.5 px-3 text-center text-slate-300">{r.overs}</td>
-                                          <td className="py-2.5 px-3 text-center text-cyan-300 font-extrabold">{r.runs}</td>
-                                          <td className="py-2.5 px-3 text-center text-emerald-400 font-bold">{r.wkt}</td>
-                                          <td className="py-2.5 px-3 text-center text-slate-300">{r.str}</td>
-                                          <td className="py-2.5 px-3 text-center text-slate-300">{r.avg}</td>
-                                        </tr>
-                                      ))}
-                                      {/* Total Row */}
-                                      <tr className="bg-[#0f2438] text-white font-extrabold border-t-2 border-slate-700">
-                                        <td className="py-2.5 px-4">Total</td>
-                                        <td className="py-2.5 px-3 text-center">{comfortLevelStats.total.overs}</td>
-                                        <td className="py-2.5 px-3 text-center text-cyan-300">{comfortLevelStats.total.runs}</td>
-                                        <td className="py-2.5 px-3 text-center text-emerald-400">{comfortLevelStats.total.wkt}</td>
-                                        <td className="py-2.5 px-3 text-center">{comfortLevelStats.total.str}</td>
-                                        <td className="py-2.5 px-3 text-center">{comfortLevelStats.total.avg}</td>
-                                      </tr>
-                                    </tbody>
-                                  </table>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* SLIDE 8: COMFORT LEVEL REPORT - GRAPHICAL */}
-                      {previewSlide === cGfxNum && (
-                        <div
-                          id="slide-comfort-gfx-node"
-                          className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg shadow-2xl p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
-                          style={{ fontFamily: 'sans-serif' }}
-                        >
-                          <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
-
-                          <div className="pl-6 flex-1 flex flex-col justify-between">
-                            <div>
-                              <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
-                                {slide2Title}
-                              </h1>
-
-                              <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                                <span className="text-slate-950 text-sm">■</span> COMFORT LEVEL REPORT - GRAPHICAL
-                              </div>
-                            </div>
-
-                            <div className="w-full bg-[#071320] border border-slate-800 rounded-xl p-4 shadow-xl flex-1 flex flex-col justify-between">
-                              <div>
-                                <div className="text-xs font-extrabold uppercase text-white tracking-wider">COMFORT LEVEL</div>
-                                <div className="text-[10px] text-cyan-400/80 mb-3">Graphical comfort level against bowling type</div>
-
-                                {/* Summary Header Banner */}
-                                <div className="w-full bg-[#0d1d2e] border border-slate-800 rounded-lg p-3 mb-4 flex items-center justify-between">
-                                  <div>
-                                    <div className="text-sm font-extrabold text-white uppercase">{activeBatter.name}</div>
-                                    <div className="text-[10px] text-slate-400">Graphical comfort level summary</div>
-                                  </div>
-
-                                  <div className="flex items-center gap-2">
-                                    <span className="bg-amber-950/80 border border-amber-500/60 text-amber-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      Runs {comfortLevelStats.total.runs}
-                                    </span>
-                                    <span className="bg-emerald-950/80 border border-emerald-500/60 text-emerald-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      WKT {comfortLevelStats.total.wkt}
-                                    </span>
-                                    <span className="bg-cyan-950/80 border border-cyan-500/60 text-cyan-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      STR {comfortLevelStats.total.str}
-                                    </span>
-                                    <span className="bg-indigo-950/80 border border-indigo-500/60 text-indigo-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      AVG {comfortLevelStats.total.avg}
-                                    </span>
-                                  </div>
-                                </div>
-
-                                <div className="text-xs font-bold text-white uppercase mb-2">COMFORT LEVEL</div>
-
-                                {/* Bar Chart Container */}
-                                <div className="w-full bg-[#0b1726] border border-slate-800 rounded-lg p-3 flex justify-center">
-                                  {renderComfortBarChart(comfortLevelStats.rows)}
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </>
-                  );
-                })()}
-              </div>
-
-              {/* Offscreen containers for html-to-image capture when not currently active in tab */}
-              <div style={{ position: 'absolute', left: '-9999px', top: '-9999px', pointerEvents: 'none' }}>
-                {previewSlide !== 1 && (
-                  <div
-                    id="slide-1-node"
-                    className="relative w-[900px] h-[525px] rounded-lg flex flex-col items-center justify-center p-12 overflow-hidden select-none"
-                    style={{ backgroundColor: '#f6f4eb', color: '#1a1a1a', fontFamily: 'sans-serif' }}
-                  >
-                    <div className="absolute top-8 left-8 w-48 h-36 border-t-[14px] border-l-[14px] border-slate-950 pointer-events-none" />
-                    <div className="absolute bottom-8 right-8 w-48 h-36 border-b-[14px] border-r-[14px] border-slate-950 pointer-events-none" />
-                    <div className="text-center z-10 space-y-6 max-w-2xl px-6">
-                      <h1 className="text-5xl font-extrabold tracking-wide uppercase text-slate-950">
-                        {activeBatter.name}
-                      </h1>
-                      <div className="space-y-1.5 text-center">
-                        <p className="text-lg font-bold italic uppercase tracking-wider text-slate-800">
-                          {activeBatter.batStyle}
-                        </p>
-                        <p className="text-base font-bold italic uppercase tracking-wider text-slate-800">
-                          {activeTeam.name}
-                        </p>
-                        <p className="text-base font-bold italic uppercase tracking-wider text-slate-800">
-                          IN {matchDetails?.CompFullName || matchDetails?.CompPrefix || 'COMPETITION SEASON'}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {previewSlide !== 2 && (
-                  <div
-                    id="slide-2-node"
-                    className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
-                    style={{ fontFamily: 'sans-serif' }}
-                  >
-                    <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
-                    <div className="pl-6 flex-1 flex flex-col justify-between">
-                      <div>
-                        <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
-                          {slide2Title}
-                        </h1>
-                        <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                          <span className="text-slate-950 text-sm">■</span> BATTING STATS
-                        </div>
-                      </div>
-
-                      {/* Player Summary Header Bar Above Table */}
-                      <div className="w-full bg-slate-900 text-white px-5 py-3 rounded-t-lg border-b border-slate-700 flex justify-between items-center shadow-md">
-                        <div>
-                          <h2 className="text-base font-extrabold uppercase text-white tracking-wide">{activeBatter.name}</h2>
-                          <p className="text-[11px] text-slate-400">Consolidated player summary</p>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-blue-950/90 text-blue-300 border border-blue-600/50">
-                            Inns {inningsWiseStats.total.innCount}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-amber-950/90 text-amber-300 border border-amber-600/50">
-                            Runs {inningsWiseStats.total.runs}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-emerald-950/90 text-emerald-300 border border-emerald-600/50">
-                            Balls {inningsWiseStats.total.balls}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-purple-950/90 text-purple-300 border border-purple-600/50">
-                            AVG {inningsWiseStats.total.avg}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-cyan-950/90 text-cyan-300 border border-cyan-600/50">
-                            S/R {inningsWiseStats.total.str}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="flex-1 flex flex-col justify-start">
-                        <div className="w-full overflow-hidden rounded-b-lg border-x border-b border-slate-300 shadow-sm">
-                          <table className="w-full text-left border-collapse text-xs font-sans">
-                            <thead>
-                              <tr className="bg-slate-900 text-white uppercase tracking-wider text-[11px]">
-                                <th className="py-3 px-4 font-bold">Inning</th>
-                                <th className="py-3 px-4 text-center font-bold">INNING</th>
-                                <th className="py-3 px-4 text-center font-bold">RUNS</th>
-                                <th className="py-3 px-4 text-center font-bold">BALLS</th>
-                                <th className="py-3 px-4 text-center font-bold">N.O</th>
-                                <th className="py-3 px-4 text-center font-bold">STR</th>
-                                <th className="py-3 px-4 text-center font-bold">AVG</th>
-                                <th className="py-3 px-4 text-center font-bold">50'S</th>
-                                <th className="py-3 px-4 text-center font-bold">100'S</th>
-                              </tr>
-                            </thead>
-
-                            <tbody className="bg-white divide-y divide-slate-200 text-slate-800 font-semibold">
-                              {inningsWiseStats.rows.length === 0 ? (
-                                <tr>
-                                  <td colSpan="9" className="py-6 text-center text-slate-500 font-normal">
-                                    No innings data recorded for {activeBatter.name}
-                                  </td>
-                                </tr>
+                            {/* Graphics Container */}
+                            <div className="w-full h-[340px] bg-[#0a1324] rounded-xl p-3 border border-slate-800 flex items-center justify-center relative overflow-hidden">
+                              {graphicsData.loading ? (
+                                <div className="w-full text-center text-xs text-blue-400 animate-pulse font-medium">Fetching Beaten Pitchmap SVG from Cricket-21...</div>
                               ) : (
-                                inningsWiseStats.rows.map((r, idx) => (
-                                  <tr key={idx}>
-                                    <td className="py-3.5 px-4 font-bold text-slate-950">{r.label}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.innCount}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.runs}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.balls}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.no}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.str}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.avg}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.fifties}</td>
-                                    <td className="py-3.5 px-4 text-center">{r.hundreds}</td>
-                                  </tr>
-                                ))
+                                <div className="w-full h-full flex items-center justify-center overflow-hidden">
+                                  {graphicsData.beatenPitchmapSvg ? (
+                                    <div
+                                      className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
+                                      dangerouslySetInnerHTML={{ __html: graphicsData.beatenPitchmapSvg }}
+                                    />
+                                  ) : (
+                                    <div className="text-xs text-slate-500">No Beaten/Uncomfortable/Dismissal Pitch Map SVG data</div>
+                                  )}
+                                </div>
                               )}
-                              <tr className="bg-slate-100 font-extrabold text-slate-950 border-t-2 border-slate-400">
-                                <td className="py-4 px-4 uppercase">{inningsWiseStats.total.label}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.innCount}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.runs}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.balls}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.no}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.str}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.avg}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.fifties}</td>
-                                <td className="py-4 px-4 text-center">{inningsWiseStats.total.hundreds}</td>
-                              </tr>
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-
-                {previewSlide !== 3 && (
-                  <div
-                    id="slide-3-node"
-                    className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
-                    style={{ fontFamily: 'sans-serif' }}
-                  >
-                    <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
-                    <div className="pl-6 flex-1 flex flex-col justify-between">
-                      <div>
-                        <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
-                          {slide2Title}
-                        </h1>
-
-                        <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                          <span className="text-slate-950 text-sm">■</span> BATTING STATS GRAPHICAL REPRESENTATION
-                        </div>
-                      </div>
-
-                      {/* Player Summary Header Bar Above Chart */}
-                      <div className="w-full bg-slate-900 text-white px-5 py-3 rounded-t-lg border-b border-slate-700 flex justify-between items-center shadow-md">
-                        <div>
-                          <h2 className="text-base font-extrabold uppercase text-white tracking-wide">{activeBatter.name}</h2>
-                          <p className="text-[11px] text-slate-400">Consolidated graphical summary</p>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-blue-950/90 text-blue-300 border border-blue-600/50">
-                            Inns {inningsWiseStats.total.innCount}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-amber-950/90 text-amber-300 border border-amber-600/50">
-                            Runs {inningsWiseStats.total.runs}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-emerald-950/90 text-emerald-300 border border-emerald-600/50">
-                            Balls {inningsWiseStats.total.balls}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-purple-950/90 text-purple-300 border border-purple-600/50">
-                            AVG {inningsWiseStats.total.avg}
-                          </span>
-                          <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-cyan-950/90 text-cyan-300 border border-cyan-600/50">
-                            S/R {inningsWiseStats.total.str}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Innings Wise Graphical Bar Chart Visualization */}
-                      <div className="flex-1 bg-white rounded-b-lg border-x border-b border-slate-300 p-6 flex flex-col justify-between shadow-sm">
-                        <h3 className="text-xs font-bold text-slate-800 uppercase tracking-widest mb-2">INNING WISE DATA</h3>
-
-                        <div className="flex-1 flex items-end justify-center space-x-12 pb-4 pt-2 px-8 border-b border-dashed border-slate-300 relative">
-                          <div className="absolute left-2 top-0 bottom-6 flex flex-col justify-between text-[10px] font-bold text-slate-400">
-                            <span>50</span>
-                            <span>40</span>
-                            <span>30</span>
-                            <span>20</span>
-                            <span>10</span>
-                            <span>0</span>
-                          </div>
-
-                          {inningsWiseStats.rows.length === 0 ? (
-                            <div className="text-xs text-slate-500 py-8">No innings data recorded for chart</div>
-                          ) : (
-                            inningsWiseStats.rows.map((r, idx) => {
-                              const runPx = Math.max(16, Math.min(130, Math.round((r.runs / 60) * 130)));
-                              const avgVal = parseFloat(r.avg) || 0;
-                              const avgPx = Math.max(16, Math.min(130, Math.round((avgVal / 60) * 130)));
-
-                              return (
-                                <div key={idx} className="flex flex-col items-center">
-                                  <div className="flex items-end space-x-2 h-[140px]">
-                                    <div className="flex flex-col items-center justify-end h-full">
-                                      <span className="text-[10px] font-extrabold text-slate-800 mb-1">{r.runs}</span>
-                                      <div
-                                        className="w-10 bg-lime-600 rounded-t-sm shadow-sm"
-                                        style={{ height: `${runPx}px` }}
-                                      />
-                                    </div>
-                                    <div className="flex flex-col items-center justify-end h-full">
-                                      <span className="text-[10px] font-extrabold text-slate-800 mb-1">{r.avg}</span>
-                                      <div
-                                        className="w-10 bg-amber-600 rounded-t-sm shadow-sm"
-                                        style={{ height: `${avgPx}px` }}
-                                      />
-                                    </div>
-                                  </div>
-                                  <span className="text-xs font-bold text-slate-900 mt-2 uppercase">{r.label}</span>
-                                </div>
-                              );
-                            })
-                          )}
-                        </div>
-
-                        <div className="flex justify-center items-center space-x-6 pt-3 text-xs font-bold text-slate-700">
-                          <div className="flex items-center space-x-2">
-                            <span className="w-3 h-3 bg-lime-600 rounded-xs" />
-                            <span>Runs</span>
-                          </div>
-                          <div className="flex items-center space-x-2">
-                            <span className="w-3 h-3 bg-amber-600 rounded-xs" />
-                            <span>Avg</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-
-              </div>
-
-              {/* Offscreen containers for html-to-image capture when not currently active in tab */}
-              <div style={{ position: 'absolute', left: '-9999px', top: '-9999px', pointerEvents: 'none' }}>
-                {previewSlide !== 4 && (
-                  <div
-                    id="slide-4-node"
-                    className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
-                    style={{ fontFamily: 'sans-serif' }}
-                  >
-                    <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
-                    <div className="pl-6 flex-1 flex flex-col justify-between">
-                      <div>
-                        <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
-                          {slide2Title}
-                        </h1>
-
-                        <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                          <span className="text-slate-950 text-sm">■</span> OVER ALL
-                        </div>
-                      </div>
-
-                      <div className="w-full h-[340px] bg-[#0a1324] rounded-xl p-3 border border-slate-800 flex items-center justify-between gap-3 relative overflow-hidden">
-                        <div className="w-1/2 h-full flex items-center justify-center overflow-hidden">
-                          {graphicsData.wwregionSvg ? (
-                            <div
-                              className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
-                              dangerouslySetInnerHTML={{ __html: graphicsData.wwregionSvg }}
-                            />
-                          ) : (
-                            <div className="text-xs text-slate-500">No Wagon Wheel Region SVG data</div>
-                          )}
-                        </div>
-
-                        <div className="w-1/2 h-full flex items-center justify-center overflow-hidden border-l border-slate-800/80 pl-3">
-                          {graphicsData.pitchmapSvg ? (
-                            <div
-                              className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
-                              dangerouslySetInnerHTML={{ __html: graphicsData.pitchmapSvg }}
-                            />
-                          ) : (
-                            <div className="text-xs text-slate-500">No Pitch Map SVG data</div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-                {previewSlide !== 5 && (
-                  <div
-                    id="slide-5-node"
-                    className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
-                    style={{ fontFamily: 'sans-serif' }}
-                  >
-                    <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
-                    <div className="pl-6 flex-1 flex flex-col justify-between">
-                      <div>
-                        <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
-                          {slide2Title}
-                        </h1>
-
-                        <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                          <span className="text-slate-950 text-sm">■</span> BEATEN , UNCOMFORTABLE & DISMISSAL AREAS
-                        </div>
-                      </div>
-
-                      <div className="w-full h-[340px] bg-[#0a1324] rounded-xl p-3 border border-slate-800 flex items-center justify-center relative overflow-hidden">
-                        <div className="w-full h-full flex items-center justify-center overflow-hidden">
-                          {graphicsData.beatenPitchmapSvg ? (
-                            <div
-                              className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
-                              dangerouslySetInnerHTML={{ __html: graphicsData.beatenPitchmapSvg }}
-                            />
-                          ) : (
-                            <div className="text-xs text-slate-500">No Beaten/Uncomfortable/Dismissal Pitch Map SVG data</div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-                {phaseWiseStats && phaseWiseStats.phases && phaseWiseStats.phases.map((p, pIdx) => {
-                  const statsSlideNum = 6 + (pIdx * 2);
-                  const gfxSlideNum = 6 + (pIdx * 2) + 1;
-                  const pGfx = graphicsData.phaseGraphicsMap[pIdx];
-
-                  return (
-                    <React.Fragment key={pIdx}>
-                      {previewSlide !== statsSlideNum && (
-                        <div
-                          id={`slide-6-node-${pIdx}`}
-                          className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-8 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
-                          style={{ fontFamily: 'sans-serif' }}
-                        >
-                          <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
-
-                          <div className="pl-6 flex-1 flex flex-col justify-between">
-                            <div>
-                              <h1 className="text-xl font-extrabold uppercase text-slate-950 tracking-tight">
-                                {slide2Title}
-                              </h1>
-
-                              <div className="text-sm font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-2 mb-3">
-                                <span className="text-slate-950 text-xs">■</span> PHASE WISE – ( {p.phaseName} )
-                              </div>
-                            </div>
-
-                            <div className="w-full bg-[#0a1b2a] rounded-xl p-4 text-white border border-slate-800 shadow-lg flex items-center gap-4">
-                              <div className="flex flex-col items-center justify-center space-y-1">
-                                <div className="w-14 h-14 rounded-full bg-slate-700/60 border-2 border-emerald-400 flex items-center justify-center text-slate-300">
-                                  <User className="w-8 h-8" />
-                                </div>
-                                <span className="text-[10px] font-extrabold uppercase tracking-wide text-emerald-300 text-center max-w-[100px] truncate">
-                                  {activeBatter.name}
-                                </span>
-                              </div>
-
-                              <div className="flex-1 grid grid-cols-7 gap-2 text-center border-l border-slate-700/80 pl-4">
-                                <div className="flex flex-col items-center">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">Inns</span>
-                                  <span className="text-base font-extrabold text-white">{p.summary.inns}</span>
-                                </div>
-                                <div className="flex flex-col items-center">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">Runs</span>
-                                  <span className="text-base font-extrabold text-white">{p.summary.runs}</span>
-                                </div>
-                                <div className="flex flex-col items-center">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">Balls</span>
-                                  <span className="text-base font-extrabold text-white">{p.summary.balls}</span>
-                                </div>
-                                <div className="flex flex-col items-center">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">Avg</span>
-                                  <span className="text-base font-extrabold text-white">{p.summary.avg}</span>
-                                </div>
-                                <div className="flex flex-col items-center">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">S/R</span>
-                                  <span className="text-base font-extrabold text-white">{p.summary.str}</span>
-                                </div>
-                                <div className="flex flex-col items-center">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">SB</span>
-                                  <span className="text-base font-extrabold text-white">{p.summary.sb}</span>
-                                </div>
-                                <div className="flex flex-col items-center">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">Dots</span>
-                                  <span className="text-base font-extrabold text-white">{p.summary.dots}</span>
-                                </div>
-
-                                <div className="flex flex-col items-center pt-1 border-t border-slate-800">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">1s</span>
-                                  <span className="text-sm font-extrabold text-blue-300">{p.summary.ones}</span>
-                                </div>
-                                <div className="flex flex-col items-center pt-1 border-t border-slate-800">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">2s</span>
-                                  <span className="text-sm font-extrabold text-blue-300">{p.summary.twos}</span>
-                                </div>
-                                <div className="flex flex-col items-center pt-1 border-t border-slate-800">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">Fours</span>
-                                  <span className="text-sm font-extrabold text-lime-400">{p.summary.fours}</span>
-                                </div>
-                                <div className="flex flex-col items-center pt-1 border-t border-slate-800">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">Sixers</span>
-                                  <span className="text-sm font-extrabold text-amber-400">{p.summary.sixes}</span>
-                                </div>
-                                <div className="flex flex-col items-center pt-1 border-t border-slate-800">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">30+</span>
-                                  <span className="text-sm font-extrabold text-purple-300">{p.summary.thirtysPlus}</span>
-                                </div>
-                                <div className="flex flex-col items-center pt-1 border-t border-slate-800">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">50+</span>
-                                  <span className="text-sm font-extrabold text-cyan-300">{p.summary.fiftysPlus}</span>
-                                </div>
-                                <div className="flex flex-col items-center pt-1 border-t border-slate-800">
-                                  <span className="text-[9px] text-slate-400 font-bold uppercase">100+</span>
-                                  <span className="text-sm font-extrabold text-emerald-400">{p.summary.hundredsPlus}</span>
-                                </div>
-                              </div>
-                            </div>
-
-                            <div className="w-full overflow-hidden rounded-xl border border-slate-800 bg-[#071320] shadow-md mt-3">
-                              <table className="w-full text-left border-collapse text-[11px] font-sans text-slate-200">
-                                <thead>
-                                  <tr className="bg-[#0f2438] text-slate-300 uppercase tracking-wider text-[10px] border-b border-slate-800">
-                                    <th className="py-2.5 px-3 font-bold">Match</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">Inns</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">Runs</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">Balls</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">S/R</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">Dots</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">1s</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">2s</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">3s</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">Fours</th>
-                                    <th className="py-2.5 px-2 text-center font-bold">Sixers</th>
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-800/80 font-semibold">
-                                  {p.matchRows.map((m, mIdx) => (
-                                    <tr key={mIdx} className="hover:bg-slate-800/40 transition-colors">
-                                      <td className="py-2.5 px-3 text-cyan-300 font-bold">
-                                        {m.matchName}
-                                      </td>
-                                      <td className="py-2.5 px-2 text-center text-slate-300">{m.innCount}</td>
-                                      <td className="py-2.5 px-2 text-center text-cyan-300 font-extrabold">{m.runs}</td>
-                                      <td className="py-2.5 px-2 text-center text-cyan-300 font-extrabold">{m.balls}</td>
-                                      <td className="py-2.5 px-2 text-center text-slate-300">{m.str}</td>
-                                      <td className="py-2.5 px-2 text-center text-emerald-400 font-bold">{m.dots}</td>
-                                      <td className="py-2.5 px-2 text-center text-slate-300">{m.ones}</td>
-                                      <td className="py-2.5 px-2 text-center text-slate-300">{m.twos}</td>
-                                      <td className="py-2.5 px-2 text-center text-slate-300">{m.threes}</td>
-                                      <td className="py-2.5 px-2 text-center text-slate-300">{m.fours}</td>
-                                      <td className="py-2.5 px-2 text-center text-slate-300">{m.sixes}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
                             </div>
                           </div>
                         </div>
                       )}
 
-                      {previewSlide !== gfxSlideNum && (
+                      {/* SLIDE 6+: PHASE WISE STATS & GRAPHICS PAIRS */}
+                      {phaseWiseStats.phases.map((p, pIdx) => {
+                        const statsSlideNum = 6 + (pIdx * 2);
+                        const gfxSlideNum = 6 + (pIdx * 2) + 1;
+                        const pGfx = graphicsData.phaseGraphicsMap[pIdx];
+
+                        return (
+                          <React.Fragment key={pIdx}>
+                            {/* STATS TABLE SLIDE */}
+                            {previewSlide === statsSlideNum && (
+                              <div
+                                id={`slide-6-node-${pIdx}`}
+                                className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg shadow-2xl p-8 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
+                                style={{ fontFamily: 'sans-serif' }}
+                              >
+                                <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+
+                                <div className="pl-6 flex-1 flex flex-col justify-between">
+                                  <div>
+                                    <h1 className="text-xl font-extrabold uppercase text-slate-950 tracking-tight">
+                                      {slide2Title}
+                                    </h1>
+
+                                    <div className="text-sm font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-2 mb-3">
+                                      <span className="text-slate-950 text-xs">■</span> PHASE WISE – ( {p.phaseName} )
+                                    </div>
+                                  </div>
+
+                                  <div className="w-full bg-[#0a1b2a] rounded-xl p-4 text-white border border-slate-800 shadow-lg flex items-center gap-4">
+                                    <div className="flex flex-col items-center justify-center space-y-1">
+                                      <div className="w-14 h-14 rounded-full bg-slate-700/60 border-2 border-emerald-400 flex items-center justify-center text-slate-300">
+                                        <User className="w-8 h-8" />
+                                      </div>
+                                      <span className="text-[10px] font-extrabold uppercase tracking-wide text-emerald-300 text-center max-w-[100px] truncate">
+                                        {activeBatter.name}
+                                      </span>
+                                    </div>
+
+                                    <div className="flex-1 grid grid-cols-7 gap-2 text-center border-l border-slate-700/80 pl-4">
+                                      <div className="flex flex-col items-center">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">Inns</span>
+                                        <span className="text-base font-extrabold text-white">{p.summary.inns}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">Runs</span>
+                                        <span className="text-base font-extrabold text-white">{p.summary.runs}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">Balls</span>
+                                        <span className="text-base font-extrabold text-white">{p.summary.balls}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">Avg</span>
+                                        <span className="text-base font-extrabold text-white">{p.summary.avg}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">S/R</span>
+                                        <span className="text-base font-extrabold text-white">{p.summary.str}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">SB</span>
+                                        <span className="text-base font-extrabold text-white">{p.summary.sb}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">Dots</span>
+                                        <span className="text-base font-extrabold text-white">{p.summary.dots}</span>
+                                      </div>
+
+                                      <div className="flex flex-col items-center pt-1 border-t border-slate-800">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">1s</span>
+                                        <span className="text-sm font-extrabold text-blue-300">{p.summary.ones}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center pt-1 border-t border-slate-800">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">2s</span>
+                                        <span className="text-sm font-extrabold text-blue-300">{p.summary.twos}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center pt-1 border-t border-slate-800">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">Fours</span>
+                                        <span className="text-sm font-extrabold text-lime-400">{p.summary.fours}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center pt-1 border-t border-slate-800">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">Sixers</span>
+                                        <span className="text-sm font-extrabold text-amber-400">{p.summary.sixes}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center pt-1 border-t border-slate-800">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">30+</span>
+                                        <span className="text-sm font-extrabold text-purple-300">{p.summary.thirtysPlus}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center pt-1 border-t border-slate-800">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">50+</span>
+                                        <span className="text-sm font-extrabold text-cyan-300">{p.summary.fiftysPlus}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center pt-1 border-t border-slate-800">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">100+</span>
+                                        <span className="text-sm font-extrabold text-emerald-400">{p.summary.hundredsPlus}</span>
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="w-full overflow-hidden rounded-xl border border-slate-800 bg-[#071320] shadow-md mt-3">
+                                    <table className="w-full text-left border-collapse text-[11px] font-sans text-slate-200">
+                                      <thead>
+                                        <tr className="bg-[#0f2438] text-slate-300 uppercase tracking-wider text-[10px] border-b border-slate-800">
+                                          <th className="py-2.5 px-3 font-bold">Match</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">Inns</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">Runs</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">Balls</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">S/R</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">Dots</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">1s</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">2s</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">3s</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">Fours</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">Sixers</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody className="divide-y divide-slate-800/80 font-semibold">
+                                        {p.matchRows.map((m, mIdx) => (
+                                          <tr key={mIdx} className="hover:bg-slate-800/40 transition-colors">
+                                            <td className="py-2.5 px-3 text-cyan-300 font-bold">
+                                              {m.matchName}
+                                            </td>
+                                            <td className="py-2.5 px-2 text-center text-slate-300">{m.innCount}</td>
+                                            <td className="py-2.5 px-2 text-center text-cyan-300 font-extrabold">{m.runs}</td>
+                                            <td className="py-2.5 px-2 text-center text-cyan-300 font-extrabold">{m.balls}</td>
+                                            <td className="py-2.5 px-2 text-center text-slate-300">{m.str}</td>
+                                            <td className="py-2.5 px-2 text-center text-emerald-400 font-bold">{m.dots}</td>
+                                            <td className="py-2.5 px-2 text-center text-slate-300">{m.ones}</td>
+                                            <td className="py-2.5 px-2 text-center text-slate-300">{m.twos}</td>
+                                            <td className="py-2.5 px-2 text-center text-slate-300">{m.threes}</td>
+                                            <td className="py-2.5 px-2 text-center text-slate-300">{m.fours}</td>
+                                            <td className="py-2.5 px-2 text-center text-slate-300">{m.sixes}</td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* GRAPHICS SLIDE */}
+                            {previewSlide === gfxSlideNum && (
+                              <div
+                                id={`slide-6-gfx-node-${pIdx}`}
+                                className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg shadow-2xl p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
+                                style={{ fontFamily: 'sans-serif' }}
+                              >
+                                <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+
+                                <div className="pl-6 flex-1 flex flex-col justify-between">
+                                  <div>
+                                    <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
+                                      {slide2Title}
+                                    </h1>
+
+                                    <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
+                                      <span className="text-slate-950 text-sm">■</span> PHASE WISE – ( {p.phaseName} )
+                                    </div>
+                                  </div>
+
+                                  <div className="w-full h-[340px] bg-[#0a1324] rounded-xl p-3 border border-slate-800 flex items-center justify-between gap-3 relative overflow-hidden">
+                                    {graphicsData.loading ? (
+                                      <div className="w-full text-center text-xs text-blue-400 animate-pulse font-medium">Fetching Phase Graphics SVGs from Cricket-21...</div>
+                                    ) : (
+                                      <>
+                                        <div className="w-1/2 h-full flex items-center justify-center overflow-hidden">
+                                          {pGfx?.wwregionSvg ? (
+                                            <div
+                                              className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
+                                              dangerouslySetInnerHTML={{ __html: pGfx.wwregionSvg }}
+                                            />
+                                          ) : (
+                                            <div className="text-xs text-slate-500">No Wagon Wheel Region SVG data</div>
+                                          )}
+                                        </div>
+
+                                        <div className="w-1/2 h-full flex items-center justify-center overflow-hidden border-l border-slate-800/80 pl-3">
+                                          {pGfx?.pitchmapSvg ? (
+                                            <div
+                                              className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
+                                              dangerouslySetInnerHTML={{ __html: pGfx.pitchmapSvg }}
+                                            />
+                                          ) : (
+                                            <div className="text-xs text-slate-500">No Pitch Map SVG data</div>
+                                          )}
+                                        </div>
+                                      </>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </React.Fragment>
+                        );
+                      })}
+
+                      {/* SLIDE 7: COMFORT LEVEL REPORT (Table View) */}
+                      {(() => {
+                        const pCount = phaseWiseStats?.phases?.length || 0;
+                        const cTableNum = 6 + (pCount * 2);
+                        const cGfxNum = 6 + (pCount * 2) + 1;
+
+                        return (
+                          <>
+                            {previewSlide === cTableNum && (
+                              <div
+                                id="slide-comfort-node"
+                                className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg shadow-2xl p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
+                                style={{ fontFamily: 'sans-serif' }}
+                              >
+                                <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+
+                                <div className="pl-6 flex-1 flex flex-col justify-between">
+                                  <div>
+                                    <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
+                                      {slide2Title}
+                                    </h1>
+
+                                    <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
+                                      <span className="text-slate-950 text-sm">■</span> COMFORT LEVEL REPORT
+                                    </div>
+                                  </div>
+
+                                  <div className="w-full bg-[#071320] border border-slate-800 rounded-xl p-4 shadow-xl flex-1 flex flex-col justify-between">
+                                    <div>
+                                      <div className="text-xs font-extrabold uppercase text-white tracking-wider">COMFORT LEVEL</div>
+                                      <div className="text-[10px] text-cyan-400/80 mb-3">Player-wise batting comfort level against bowling type</div>
+
+                                      {/* Summary Header Banner */}
+                                      <div className="w-full bg-[#0d1d2e] border border-slate-800 rounded-lg p-3 mb-4 flex items-center justify-between">
+                                        <div>
+                                          <div className="text-sm font-extrabold text-white uppercase">{activeBatter.name}</div>
+                                          <div className="text-[10px] text-slate-400">Filtered batting comfort summary</div>
+                                        </div>
+
+                                        <div className="flex items-center gap-2">
+                                          <span className="bg-amber-950/80 border border-amber-500/60 text-amber-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            Runs {comfortLevelStats.total.runs}
+                                          </span>
+                                          <span className="bg-emerald-950/80 border border-emerald-500/60 text-emerald-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            WKT {comfortLevelStats.total.wkt}
+                                          </span>
+                                          <span className="bg-cyan-950/80 border border-cyan-500/60 text-cyan-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            STR {comfortLevelStats.total.str}
+                                          </span>
+                                          <span className="bg-indigo-950/80 border border-indigo-500/60 text-indigo-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            AVG {comfortLevelStats.total.avg}
+                                          </span>
+                                        </div>
+                                      </div>
+
+                                      <div className="text-xs font-bold text-white uppercase mb-2">COMFORT LEVEL AGAINST BOWLING TYPE</div>
+
+                                      {/* Table */}
+                                      <div className="w-full overflow-hidden rounded-lg border border-slate-800 bg-[#0b1726]">
+                                        <table className="w-full text-left border-collapse text-[11px] font-sans text-slate-200">
+                                          <thead>
+                                            <tr className="bg-[#0f2438] text-slate-300 uppercase tracking-wider text-[10px] border-b border-slate-800">
+                                              <th className="py-2.5 px-4 font-bold">TYPE</th>
+                                              <th className="py-2.5 px-3 text-center font-bold">OVERS</th>
+                                              <th className="py-2.5 px-3 text-center font-bold">RUNS</th>
+                                              <th className="py-2.5 px-3 text-center font-bold">WKT</th>
+                                              <th className="py-2.5 px-3 text-center font-bold">STR</th>
+                                              <th className="py-2.5 px-3 text-center font-bold">AVG</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody className="divide-y divide-slate-800/80 font-semibold">
+                                            {comfortLevelStats.rows.map((r, rIdx) => (
+                                              <tr key={rIdx} className="hover:bg-slate-800/40 transition-colors">
+                                                <td className="py-2.5 px-4 text-cyan-300 font-bold">{r.type}</td>
+                                                <td className="py-2.5 px-3 text-center text-slate-300">{r.overs}</td>
+                                                <td className="py-2.5 px-3 text-center text-cyan-300 font-extrabold">{r.runs}</td>
+                                                <td className="py-2.5 px-3 text-center text-emerald-400 font-bold">{r.wkt}</td>
+                                                <td className="py-2.5 px-3 text-center text-slate-300">{r.str}</td>
+                                                <td className="py-2.5 px-3 text-center text-slate-300">{r.avg}</td>
+                                              </tr>
+                                            ))}
+                                            {/* Total Row */}
+                                            <tr className="bg-[#0f2438] text-white font-extrabold border-t-2 border-slate-700">
+                                              <td className="py-2.5 px-4">Total</td>
+                                              <td className="py-2.5 px-3 text-center">{comfortLevelStats.total.overs}</td>
+                                              <td className="py-2.5 px-3 text-center text-cyan-300">{comfortLevelStats.total.runs}</td>
+                                              <td className="py-2.5 px-3 text-center text-emerald-400">{comfortLevelStats.total.wkt}</td>
+                                              <td className="py-2.5 px-3 text-center">{comfortLevelStats.total.str}</td>
+                                              <td className="py-2.5 px-3 text-center">{comfortLevelStats.total.avg}</td>
+                                            </tr>
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* SLIDE 8: COMFORT LEVEL REPORT - GRAPHICAL */}
+                            {previewSlide === cGfxNum && (
+                              <div
+                                id="slide-comfort-gfx-node"
+                                className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg shadow-2xl p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
+                                style={{ fontFamily: 'sans-serif' }}
+                              >
+                                <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+
+                                <div className="pl-6 flex-1 flex flex-col justify-between">
+                                  <div>
+                                    <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
+                                      {slide2Title}
+                                    </h1>
+
+                                    <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
+                                      <span className="text-slate-950 text-sm">■</span> COMFORT LEVEL REPORT - GRAPHICAL
+                                    </div>
+                                  </div>
+
+                                  <div className="w-full bg-[#071320] border border-slate-800 rounded-xl p-4 shadow-xl flex-1 flex flex-col justify-between">
+                                    <div>
+                                      <div className="text-xs font-extrabold uppercase text-white tracking-wider">COMFORT LEVEL</div>
+                                      <div className="text-[10px] text-cyan-400/80 mb-3">Graphical comfort level against bowling type</div>
+
+                                      {/* Summary Header Banner */}
+                                      <div className="w-full bg-[#0d1d2e] border border-slate-800 rounded-lg p-3 mb-4 flex items-center justify-between">
+                                        <div>
+                                          <div className="text-sm font-extrabold text-white uppercase">{activeBatter.name}</div>
+                                          <div className="text-[10px] text-slate-400">Graphical comfort level summary</div>
+                                        </div>
+
+                                        <div className="flex items-center gap-2">
+                                          <span className="bg-amber-950/80 border border-amber-500/60 text-amber-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            Runs {comfortLevelStats.total.runs}
+                                          </span>
+                                          <span className="bg-emerald-950/80 border border-emerald-500/60 text-emerald-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            WKT {comfortLevelStats.total.wkt}
+                                          </span>
+                                          <span className="bg-cyan-950/80 border border-cyan-500/60 text-cyan-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            STR {comfortLevelStats.total.str}
+                                          </span>
+                                          <span className="bg-indigo-950/80 border border-indigo-500/60 text-indigo-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            AVG {comfortLevelStats.total.avg}
+                                          </span>
+                                        </div>
+                                      </div>
+
+                                      <div className="text-xs font-bold text-white uppercase mb-2">COMFORT LEVEL</div>
+
+                                      {/* Bar Chart Container */}
+                                      <div className="w-full bg-[#0b1726] border border-slate-800 rounded-lg p-3 flex justify-center">
+                                        {renderComfortBarChart(comfortLevelStats.rows)}
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+
+                    {/* Offscreen containers for html-to-image capture when not currently active in tab */}
+                    <div style={{ position: 'absolute', left: '-9999px', top: '-9999px', pointerEvents: 'none' }}>
+                      {previewSlide !== 1 && (
                         <div
-                          id={`slide-6-gfx-node-${pIdx}`}
+                          id="slide-1-node"
+                          className="relative w-[900px] h-[525px] rounded-lg flex flex-col items-center justify-center p-12 overflow-hidden select-none"
+                          style={{ backgroundColor: '#f6f4eb', color: '#1a1a1a', fontFamily: 'sans-serif' }}
+                        >
+                          <div className="absolute top-8 left-8 w-48 h-36 border-t-[14px] border-l-[14px] border-slate-950 pointer-events-none" />
+                          <div className="absolute bottom-8 right-8 w-48 h-36 border-b-[14px] border-r-[14px] border-slate-950 pointer-events-none" />
+                          <div className="text-center z-10 space-y-6 max-w-2xl px-6">
+                            <h1 className="text-5xl font-extrabold tracking-wide uppercase text-slate-950">
+                              {activeBatter.name}
+                            </h1>
+                            <div className="space-y-1.5 text-center">
+                              <p className="text-lg font-bold italic uppercase tracking-wider text-slate-800">
+                                {activeBatter.batStyle}
+                              </p>
+                              <p className="text-base font-bold italic uppercase tracking-wider text-slate-800">
+                                {activeTeam.name}
+                              </p>
+                              <p className="text-base font-bold italic uppercase tracking-wider text-slate-800">
+                                IN {matchDetails?.CompFullName || matchDetails?.CompPrefix || 'COMPETITION SEASON'}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {previewSlide !== 2 && (
+                        <div
+                          id="slide-2-node"
                           className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
                           style={{ fontFamily: 'sans-serif' }}
                         >
                           <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+                          <div className="pl-6 flex-1 flex flex-col justify-between">
+                            <div>
+                              <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
+                                {slide2Title}
+                              </h1>
+                              <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
+                                <span className="text-slate-950 text-sm">■</span> BATTING STATS
+                              </div>
+                            </div>
 
+                            {/* Player Summary Header Bar Above Table */}
+                            <div className="w-full bg-slate-900 text-white px-5 py-3 rounded-t-lg border-b border-slate-700 flex justify-between items-center shadow-md">
+                              <div>
+                                <h2 className="text-base font-extrabold uppercase text-white tracking-wide">{activeBatter.name}</h2>
+                                <p className="text-[11px] text-slate-400">Consolidated player summary</p>
+                              </div>
+                              <div className="flex items-center space-x-2">
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-blue-950/90 text-blue-300 border border-blue-600/50">
+                                  Inns {inningsWiseStats.total.innCount}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-amber-950/90 text-amber-300 border border-amber-600/50">
+                                  Runs {inningsWiseStats.total.runs}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-emerald-950/90 text-emerald-300 border border-emerald-600/50">
+                                  Balls {inningsWiseStats.total.balls}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-purple-950/90 text-purple-300 border border-purple-600/50">
+                                  AVG {inningsWiseStats.total.avg}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-cyan-950/90 text-cyan-300 border border-cyan-600/50">
+                                  S/R {inningsWiseStats.total.str}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="flex-1 flex flex-col justify-start">
+                              <div className="w-full overflow-hidden rounded-b-lg border-x border-b border-slate-300 shadow-sm">
+                                <table className="w-full text-left border-collapse text-xs font-sans">
+                                  <thead>
+                                    <tr className="bg-slate-900 text-white uppercase tracking-wider text-[11px]">
+                                      <th className="py-3 px-4 font-bold">Inning</th>
+                                      <th className="py-3 px-4 text-center font-bold">INNING</th>
+                                      <th className="py-3 px-4 text-center font-bold">RUNS</th>
+                                      <th className="py-3 px-4 text-center font-bold">BALLS</th>
+                                      <th className="py-3 px-4 text-center font-bold">N.O</th>
+                                      <th className="py-3 px-4 text-center font-bold">STR</th>
+                                      <th className="py-3 px-4 text-center font-bold">AVG</th>
+                                      <th className="py-3 px-4 text-center font-bold">50'S</th>
+                                      <th className="py-3 px-4 text-center font-bold">100'S</th>
+                                    </tr>
+                                  </thead>
+
+                                  <tbody className="bg-white divide-y divide-slate-200 text-slate-800 font-semibold">
+                                    {inningsWiseStats.rows.length === 0 ? (
+                                      <tr>
+                                        <td colSpan="9" className="py-6 text-center text-slate-500 font-normal">
+                                          No innings data recorded for {activeBatter.name}
+                                        </td>
+                                      </tr>
+                                    ) : (
+                                      inningsWiseStats.rows.map((r, idx) => (
+                                        <tr key={idx}>
+                                          <td className="py-3.5 px-4 font-bold text-slate-950">{r.label}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.innCount}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.runs}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.balls}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.no}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.str}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.avg}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.fifties}</td>
+                                          <td className="py-3.5 px-4 text-center">{r.hundreds}</td>
+                                        </tr>
+                                      ))
+                                    )}
+                                    <tr className="bg-slate-100 font-extrabold text-slate-950 border-t-2 border-slate-400">
+                                      <td className="py-4 px-4 uppercase">{inningsWiseStats.total.label}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.innCount}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.runs}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.balls}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.no}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.str}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.avg}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.fifties}</td>
+                                      <td className="py-4 px-4 text-center">{inningsWiseStats.total.hundreds}</td>
+                                    </tr>
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+
+                      {previewSlide !== 3 && (
+                        <div
+                          id="slide-3-node"
+                          className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
+                          style={{ fontFamily: 'sans-serif' }}
+                        >
+                          <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
                           <div className="pl-6 flex-1 flex flex-col justify-between">
                             <div>
                               <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
@@ -3525,16 +3579,126 @@ export default function App() {
                               </h1>
 
                               <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                                <span className="text-slate-950 text-sm">■</span> PHASE WISE – ( {p.phaseName} )
+                                <span className="text-slate-950 text-sm">■</span> BATTING STATS GRAPHICAL REPRESENTATION
+                              </div>
+                            </div>
+
+                            {/* Player Summary Header Bar Above Chart */}
+                            <div className="w-full bg-slate-900 text-white px-5 py-3 rounded-t-lg border-b border-slate-700 flex justify-between items-center shadow-md">
+                              <div>
+                                <h2 className="text-base font-extrabold uppercase text-white tracking-wide">{activeBatter.name}</h2>
+                                <p className="text-[11px] text-slate-400">Consolidated graphical summary</p>
+                              </div>
+                              <div className="flex items-center space-x-2">
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-blue-950/90 text-blue-300 border border-blue-600/50">
+                                  Inns {inningsWiseStats.total.innCount}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-amber-950/90 text-amber-300 border border-amber-600/50">
+                                  Runs {inningsWiseStats.total.runs}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-emerald-950/90 text-emerald-300 border border-emerald-600/50">
+                                  Balls {inningsWiseStats.total.balls}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-purple-950/90 text-purple-300 border border-purple-600/50">
+                                  AVG {inningsWiseStats.total.avg}
+                                </span>
+                                <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-cyan-950/90 text-cyan-300 border border-cyan-600/50">
+                                  S/R {inningsWiseStats.total.str}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Innings Wise Graphical Bar Chart Visualization */}
+                            <div className="flex-1 bg-white rounded-b-lg border-x border-b border-slate-300 p-6 flex flex-col justify-between shadow-sm">
+                              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-widest mb-2">INNING WISE DATA</h3>
+
+                              <div className="flex-1 flex items-end justify-center space-x-12 pb-4 pt-2 px-8 border-b border-dashed border-slate-300 relative">
+                                <div className="absolute left-2 top-0 bottom-6 flex flex-col justify-between text-[10px] font-bold text-slate-400">
+                                  <span>50</span>
+                                  <span>40</span>
+                                  <span>30</span>
+                                  <span>20</span>
+                                  <span>10</span>
+                                  <span>0</span>
+                                </div>
+
+                                {inningsWiseStats.rows.length === 0 ? (
+                                  <div className="text-xs text-slate-500 py-8">No innings data recorded for chart</div>
+                                ) : (
+                                  inningsWiseStats.rows.map((r, idx) => {
+                                    const runPx = Math.max(16, Math.min(130, Math.round((r.runs / 60) * 130)));
+                                    const avgVal = parseFloat(r.avg) || 0;
+                                    const avgPx = Math.max(16, Math.min(130, Math.round((avgVal / 60) * 130)));
+
+                                    return (
+                                      <div key={idx} className="flex flex-col items-center">
+                                        <div className="flex items-end space-x-2 h-[140px]">
+                                          <div className="flex flex-col items-center justify-end h-full">
+                                            <span className="text-[10px] font-extrabold text-slate-800 mb-1">{r.runs}</span>
+                                            <div
+                                              className="w-10 bg-lime-600 rounded-t-sm shadow-sm"
+                                              style={{ height: `${runPx}px` }}
+                                            />
+                                          </div>
+                                          <div className="flex flex-col items-center justify-end h-full">
+                                            <span className="text-[10px] font-extrabold text-slate-800 mb-1">{r.avg}</span>
+                                            <div
+                                              className="w-10 bg-amber-600 rounded-t-sm shadow-sm"
+                                              style={{ height: `${avgPx}px` }}
+                                            />
+                                          </div>
+                                        </div>
+                                        <span className="text-xs font-bold text-slate-900 mt-2 uppercase">{r.label}</span>
+                                      </div>
+                                    );
+                                  })
+                                )}
+                              </div>
+
+                              <div className="flex justify-center items-center space-x-6 pt-3 text-xs font-bold text-slate-700">
+                                <div className="flex items-center space-x-2">
+                                  <span className="w-3 h-3 bg-lime-600 rounded-xs" />
+                                  <span>Runs</span>
+                                </div>
+                                <div className="flex items-center space-x-2">
+                                  <span className="w-3 h-3 bg-amber-600 rounded-xs" />
+                                  <span>Avg</span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+
+                    </div>
+
+                    {/* Offscreen containers for html-to-image capture when not currently active in tab */}
+                    <div style={{ position: 'absolute', left: '-9999px', top: '-9999px', pointerEvents: 'none' }}>
+                      {previewSlide !== 4 && (
+                        <div
+                          id="slide-4-node"
+                          className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
+                          style={{ fontFamily: 'sans-serif' }}
+                        >
+                          <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+                          <div className="pl-6 flex-1 flex flex-col justify-between">
+                            <div>
+                              <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
+                                {slide2Title}
+                              </h1>
+
+                              <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
+                                <span className="text-slate-950 text-sm">■</span> OVER ALL
                               </div>
                             </div>
 
                             <div className="w-full h-[340px] bg-[#0a1324] rounded-xl p-3 border border-slate-800 flex items-center justify-between gap-3 relative overflow-hidden">
                               <div className="w-1/2 h-full flex items-center justify-center overflow-hidden">
-                                {pGfx?.wwregionSvg ? (
+                                {graphicsData.wwregionSvg ? (
                                   <div
                                     className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
-                                    dangerouslySetInnerHTML={{ __html: pGfx.wwregionSvg }}
+                                    dangerouslySetInnerHTML={{ __html: graphicsData.wwregionSvg }}
                                   />
                                 ) : (
                                   <div className="text-xs text-slate-500">No Wagon Wheel Region SVG data</div>
@@ -3542,10 +3706,10 @@ export default function App() {
                               </div>
 
                               <div className="w-1/2 h-full flex items-center justify-center overflow-hidden border-l border-slate-800/80 pl-3">
-                                {pGfx?.pitchmapSvg ? (
+                                {graphicsData.pitchmapSvg ? (
                                   <div
                                     className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
-                                    dangerouslySetInnerHTML={{ __html: pGfx.pitchmapSvg }}
+                                    dangerouslySetInnerHTML={{ __html: graphicsData.pitchmapSvg }}
                                   />
                                 ) : (
                                   <div className="text-xs text-slate-500">No Pitch Map SVG data</div>
@@ -3555,26 +3719,13 @@ export default function App() {
                           </div>
                         </div>
                       )}
-                    </React.Fragment>
-                  );
-                })}
-
-                {/* OFFSCREEN HIDDEN NODES FOR SLIDE 7 & SLIDE 8 (PDF Export) */}
-                {(() => {
-                  const pCount = phaseWiseStats?.phases?.length || 0;
-                  const cTableNum = 6 + (pCount * 2);
-                  const cGfxNum = 6 + (pCount * 2) + 1;
-
-                  return (
-                    <>
-                      {previewSlide !== cTableNum && (
+                      {previewSlide !== 5 && (
                         <div
-                          id="slide-comfort-node"
+                          id="slide-5-node"
                           className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
                           style={{ fontFamily: 'sans-serif' }}
                         >
                           <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
-
                           <div className="pl-6 flex-1 flex flex-col justify-between">
                             <div>
                               <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
@@ -3582,143 +3733,373 @@ export default function App() {
                               </h1>
 
                               <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                                <span className="text-slate-950 text-sm">■</span> COMFORT LEVEL REPORT
+                                <span className="text-slate-950 text-sm">■</span> BEATEN , UNCOMFORTABLE & DISMISSAL AREAS
                               </div>
                             </div>
 
-                            <div className="w-full bg-[#071320] border border-slate-800 rounded-xl p-4 shadow-xl flex-1 flex flex-col justify-between">
-                              <div>
-                                <div className="text-xs font-extrabold uppercase text-white tracking-wider">COMFORT LEVEL</div>
-                                <div className="text-[10px] text-cyan-400/80 mb-3">Player-wise batting comfort level against bowling type</div>
+                            <div className="w-full h-[340px] bg-[#0a1324] rounded-xl p-3 border border-slate-800 flex items-center justify-center relative overflow-hidden">
+                              <div className="w-full h-full flex items-center justify-center overflow-hidden">
+                                {graphicsData.beatenPitchmapSvg ? (
+                                  <div
+                                    className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
+                                    dangerouslySetInnerHTML={{ __html: graphicsData.beatenPitchmapSvg }}
+                                  />
+                                ) : (
+                                  <div className="text-xs text-slate-500">No Beaten/Uncomfortable/Dismissal Pitch Map SVG data</div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      {phaseWiseStats && phaseWiseStats.phases && phaseWiseStats.phases.map((p, pIdx) => {
+                        const statsSlideNum = 6 + (pIdx * 2);
+                        const gfxSlideNum = 6 + (pIdx * 2) + 1;
+                        const pGfx = graphicsData.phaseGraphicsMap[pIdx];
 
-                                <div className="w-full bg-[#0d1d2e] border border-slate-800 rounded-lg p-3 mb-4 flex items-center justify-between">
+                        return (
+                          <React.Fragment key={pIdx}>
+                            {previewSlide !== statsSlideNum && (
+                              <div
+                                id={`slide-6-node-${pIdx}`}
+                                className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-8 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
+                                style={{ fontFamily: 'sans-serif' }}
+                              >
+                                <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+
+                                <div className="pl-6 flex-1 flex flex-col justify-between">
                                   <div>
-                                    <div className="text-sm font-extrabold text-white uppercase">{activeBatter.name}</div>
-                                    <div className="text-[10px] text-slate-400">Filtered batting comfort summary</div>
+                                    <h1 className="text-xl font-extrabold uppercase text-slate-950 tracking-tight">
+                                      {slide2Title}
+                                    </h1>
+
+                                    <div className="text-sm font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-2 mb-3">
+                                      <span className="text-slate-950 text-xs">■</span> PHASE WISE – ( {p.phaseName} )
+                                    </div>
                                   </div>
 
-                                  <div className="flex items-center gap-2">
-                                    <span className="bg-amber-950/80 border border-amber-500/60 text-amber-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      Runs {comfortLevelStats.total.runs}
-                                    </span>
-                                    <span className="bg-emerald-950/80 border border-emerald-500/60 text-emerald-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      WKT {comfortLevelStats.total.wkt}
-                                    </span>
-                                    <span className="bg-cyan-950/80 border border-cyan-500/60 text-cyan-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      STR {comfortLevelStats.total.str}
-                                    </span>
-                                    <span className="bg-indigo-950/80 border border-indigo-500/60 text-indigo-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      AVG {comfortLevelStats.total.avg}
-                                    </span>
+                                  <div className="w-full bg-[#0a1b2a] rounded-xl p-4 text-white border border-slate-800 shadow-lg flex items-center gap-4">
+                                    <div className="flex flex-col items-center justify-center space-y-1">
+                                      <div className="w-14 h-14 rounded-full bg-slate-700/60 border-2 border-emerald-400 flex items-center justify-center text-slate-300">
+                                        <User className="w-8 h-8" />
+                                      </div>
+                                      <span className="text-[10px] font-extrabold uppercase tracking-wide text-emerald-300 text-center max-w-[100px] truncate">
+                                        {activeBatter.name}
+                                      </span>
+                                    </div>
+
+                                    <div className="flex-1 grid grid-cols-7 gap-2 text-center border-l border-slate-700/80 pl-4">
+                                      <div className="flex flex-col items-center">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">Inns</span>
+                                        <span className="text-base font-extrabold text-white">{p.summary.inns}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">Runs</span>
+                                        <span className="text-base font-extrabold text-white">{p.summary.runs}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">Balls</span>
+                                        <span className="text-base font-extrabold text-white">{p.summary.balls}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">Avg</span>
+                                        <span className="text-base font-extrabold text-white">{p.summary.avg}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">S/R</span>
+                                        <span className="text-base font-extrabold text-white">{p.summary.str}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">SB</span>
+                                        <span className="text-base font-extrabold text-white">{p.summary.sb}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">Dots</span>
+                                        <span className="text-base font-extrabold text-white">{p.summary.dots}</span>
+                                      </div>
+
+                                      <div className="flex flex-col items-center pt-1 border-t border-slate-800">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">1s</span>
+                                        <span className="text-sm font-extrabold text-blue-300">{p.summary.ones}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center pt-1 border-t border-slate-800">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">2s</span>
+                                        <span className="text-sm font-extrabold text-blue-300">{p.summary.twos}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center pt-1 border-t border-slate-800">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">Fours</span>
+                                        <span className="text-sm font-extrabold text-lime-400">{p.summary.fours}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center pt-1 border-t border-slate-800">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">Sixers</span>
+                                        <span className="text-sm font-extrabold text-amber-400">{p.summary.sixes}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center pt-1 border-t border-slate-800">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">30+</span>
+                                        <span className="text-sm font-extrabold text-purple-300">{p.summary.thirtysPlus}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center pt-1 border-t border-slate-800">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">50+</span>
+                                        <span className="text-sm font-extrabold text-cyan-300">{p.summary.fiftysPlus}</span>
+                                      </div>
+                                      <div className="flex flex-col items-center pt-1 border-t border-slate-800">
+                                        <span className="text-[9px] text-slate-400 font-bold uppercase">100+</span>
+                                        <span className="text-sm font-extrabold text-emerald-400">{p.summary.hundredsPlus}</span>
+                                      </div>
+                                    </div>
                                   </div>
-                                </div>
 
-                                <div className="text-xs font-bold text-white uppercase mb-2">COMFORT LEVEL AGAINST BOWLING TYPE</div>
-
-                                <div className="w-full overflow-hidden rounded-lg border border-slate-800 bg-[#0b1726]">
-                                  <table className="w-full text-left border-collapse text-[11px] font-sans text-slate-200">
-                                    <thead>
-                                      <tr className="bg-[#0f2438] text-slate-300 uppercase tracking-wider text-[10px] border-b border-slate-800">
-                                        <th className="py-2.5 px-4 font-bold">TYPE</th>
-                                        <th className="py-2.5 px-3 text-center font-bold">OVERS</th>
-                                        <th className="py-2.5 px-3 text-center font-bold">RUNS</th>
-                                        <th className="py-2.5 px-3 text-center font-bold">WKT</th>
-                                        <th className="py-2.5 px-3 text-center font-bold">STR</th>
-                                        <th className="py-2.5 px-3 text-center font-bold">AVG</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-800/80 font-semibold">
-                                      {comfortLevelStats.rows.map((r, rIdx) => (
-                                        <tr key={rIdx} className="hover:bg-slate-800/40 transition-colors">
-                                          <td className="py-2.5 px-4 text-cyan-300 font-bold">{r.type}</td>
-                                          <td className="py-2.5 px-3 text-center text-slate-300">{r.overs}</td>
-                                          <td className="py-2.5 px-3 text-center text-cyan-300 font-extrabold">{r.runs}</td>
-                                          <td className="py-2.5 px-3 text-center text-emerald-400 font-bold">{r.wkt}</td>
-                                          <td className="py-2.5 px-3 text-center text-slate-300">{r.str}</td>
-                                          <td className="py-2.5 px-3 text-center text-slate-300">{r.avg}</td>
+                                  <div className="w-full overflow-hidden rounded-xl border border-slate-800 bg-[#071320] shadow-md mt-3">
+                                    <table className="w-full text-left border-collapse text-[11px] font-sans text-slate-200">
+                                      <thead>
+                                        <tr className="bg-[#0f2438] text-slate-300 uppercase tracking-wider text-[10px] border-b border-slate-800">
+                                          <th className="py-2.5 px-3 font-bold">Match</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">Inns</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">Runs</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">Balls</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">S/R</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">Dots</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">1s</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">2s</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">3s</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">Fours</th>
+                                          <th className="py-2.5 px-2 text-center font-bold">Sixers</th>
                                         </tr>
-                                      ))}
-                                      <tr className="bg-[#0f2438] text-white font-extrabold border-t-2 border-slate-700">
-                                        <td className="py-2.5 px-4">Total</td>
-                                        <td className="py-2.5 px-3 text-center">{comfortLevelStats.total.overs}</td>
-                                        <td className="py-2.5 px-3 text-center text-cyan-300">{comfortLevelStats.total.runs}</td>
-                                        <td className="py-2.5 px-3 text-center text-emerald-400">{comfortLevelStats.total.wkt}</td>
-                                        <td className="py-2.5 px-3 text-center">{comfortLevelStats.total.str}</td>
-                                        <td className="py-2.5 px-3 text-center">{comfortLevelStats.total.avg}</td>
-                                      </tr>
-                                    </tbody>
-                                  </table>
+                                      </thead>
+                                      <tbody className="divide-y divide-slate-800/80 font-semibold">
+                                        {p.matchRows.map((m, mIdx) => (
+                                          <tr key={mIdx} className="hover:bg-slate-800/40 transition-colors">
+                                            <td className="py-2.5 px-3 text-cyan-300 font-bold">
+                                              {m.matchName}
+                                            </td>
+                                            <td className="py-2.5 px-2 text-center text-slate-300">{m.innCount}</td>
+                                            <td className="py-2.5 px-2 text-center text-cyan-300 font-extrabold">{m.runs}</td>
+                                            <td className="py-2.5 px-2 text-center text-cyan-300 font-extrabold">{m.balls}</td>
+                                            <td className="py-2.5 px-2 text-center text-slate-300">{m.str}</td>
+                                            <td className="py-2.5 px-2 text-center text-emerald-400 font-bold">{m.dots}</td>
+                                            <td className="py-2.5 px-2 text-center text-slate-300">{m.ones}</td>
+                                            <td className="py-2.5 px-2 text-center text-slate-300">{m.twos}</td>
+                                            <td className="py-2.5 px-2 text-center text-slate-300">{m.threes}</td>
+                                            <td className="py-2.5 px-2 text-center text-slate-300">{m.fours}</td>
+                                            <td className="py-2.5 px-2 text-center text-slate-300">{m.sixes}</td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
                                 </div>
                               </div>
-                            </div>
-                          </div>
-                        </div>
-                      )}
+                            )}
 
-                      {previewSlide !== cGfxNum && (
-                        <div
-                          id="slide-comfort-gfx-node"
-                          className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
-                          style={{ fontFamily: 'sans-serif' }}
-                        >
-                          <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+                            {previewSlide !== gfxSlideNum && (
+                              <div
+                                id={`slide-6-gfx-node-${pIdx}`}
+                                className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
+                                style={{ fontFamily: 'sans-serif' }}
+                              >
+                                <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
 
-                          <div className="pl-6 flex-1 flex flex-col justify-between">
-                            <div>
-                              <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
-                                {slide2Title}
-                              </h1>
-
-                              <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
-                                <span className="text-slate-950 text-sm">■</span> COMFORT LEVEL REPORT - GRAPHICAL
-                              </div>
-                            </div>
-
-                            <div className="w-full bg-[#071320] border border-slate-800 rounded-xl p-4 shadow-xl flex-1 flex flex-col justify-between">
-                              <div>
-                                <div className="text-xs font-extrabold uppercase text-white tracking-wider">COMFORT LEVEL</div>
-                                <div className="text-[10px] text-cyan-400/80 mb-3">Graphical comfort level against bowling type</div>
-
-                                <div className="w-full bg-[#0d1d2e] border border-slate-800 rounded-lg p-3 mb-4 flex items-center justify-between">
+                                <div className="pl-6 flex-1 flex flex-col justify-between">
                                   <div>
-                                    <div className="text-sm font-extrabold text-white uppercase">{activeBatter.name}</div>
-                                    <div className="text-[10px] text-slate-400">Graphical comfort level summary</div>
+                                    <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
+                                      {slide2Title}
+                                    </h1>
+
+                                    <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
+                                      <span className="text-slate-950 text-sm">■</span> PHASE WISE – ( {p.phaseName} )
+                                    </div>
                                   </div>
 
-                                  <div className="flex items-center gap-2">
-                                    <span className="bg-amber-950/80 border border-amber-500/60 text-amber-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      Runs {comfortLevelStats.total.runs}
-                                    </span>
-                                    <span className="bg-emerald-950/80 border border-emerald-500/60 text-emerald-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      WKT {comfortLevelStats.total.wkt}
-                                    </span>
-                                    <span className="bg-cyan-950/80 border border-cyan-500/60 text-cyan-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      STR {comfortLevelStats.total.str}
-                                    </span>
-                                    <span className="bg-indigo-950/80 border border-indigo-500/60 text-indigo-300 text-xs px-3 py-1 rounded-full font-bold">
-                                      AVG {comfortLevelStats.total.avg}
-                                    </span>
+                                  <div className="w-full h-[340px] bg-[#0a1324] rounded-xl p-3 border border-slate-800 flex items-center justify-between gap-3 relative overflow-hidden">
+                                    <div className="w-1/2 h-full flex items-center justify-center overflow-hidden">
+                                      {pGfx?.wwregionSvg ? (
+                                        <div
+                                          className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
+                                          dangerouslySetInnerHTML={{ __html: pGfx.wwregionSvg }}
+                                        />
+                                      ) : (
+                                        <div className="text-xs text-slate-500">No Wagon Wheel Region SVG data</div>
+                                      )}
+                                    </div>
+
+                                    <div className="w-1/2 h-full flex items-center justify-center overflow-hidden border-l border-slate-800/80 pl-3">
+                                      {pGfx?.pitchmapSvg ? (
+                                        <div
+                                          className="w-full h-full flex items-center justify-center [&>svg]:w-full [&>svg]:h-full [&>svg]:max-h-[320px] [&>svg]:object-contain"
+                                          dangerouslySetInnerHTML={{ __html: pGfx.pitchmapSvg }}
+                                        />
+                                      ) : (
+                                        <div className="text-xs text-slate-500">No Pitch Map SVG data</div>
+                                      )}
+                                    </div>
                                   </div>
-                                </div>
-
-                                <div className="text-xs font-bold text-white uppercase mb-2">COMFORT LEVEL</div>
-
-                                <div className="w-full bg-[#0b1726] border border-slate-800 rounded-lg p-3 flex justify-center">
-                                  {renderComfortBarChart(comfortLevelStats.rows)}
                                 </div>
                               </div>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </>
-                  );
-                })()}
-              </div>
+                            )}
+                          </React.Fragment>
+                        );
+                      })}
 
-            </div>
-          )
-        )}
+                      {/* OFFSCREEN HIDDEN NODES FOR SLIDE 7 & SLIDE 8 (PDF Export) */}
+                      {(() => {
+                        const pCount = phaseWiseStats?.phases?.length || 0;
+                        const cTableNum = 6 + (pCount * 2);
+                        const cGfxNum = 6 + (pCount * 2) + 1;
+
+                        return (
+                          <>
+                            {previewSlide !== cTableNum && (
+                              <div
+                                id="slide-comfort-node"
+                                className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
+                                style={{ fontFamily: 'sans-serif' }}
+                              >
+                                <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+
+                                <div className="pl-6 flex-1 flex flex-col justify-between">
+                                  <div>
+                                    <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
+                                      {slide2Title}
+                                    </h1>
+
+                                    <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
+                                      <span className="text-slate-950 text-sm">■</span> COMFORT LEVEL REPORT
+                                    </div>
+                                  </div>
+
+                                  <div className="w-full bg-[#071320] border border-slate-800 rounded-xl p-4 shadow-xl flex-1 flex flex-col justify-between">
+                                    <div>
+                                      <div className="text-xs font-extrabold uppercase text-white tracking-wider">COMFORT LEVEL</div>
+                                      <div className="text-[10px] text-cyan-400/80 mb-3">Player-wise batting comfort level against bowling type</div>
+
+                                      <div className="w-full bg-[#0d1d2e] border border-slate-800 rounded-lg p-3 mb-4 flex items-center justify-between">
+                                        <div>
+                                          <div className="text-sm font-extrabold text-white uppercase">{activeBatter.name}</div>
+                                          <div className="text-[10px] text-slate-400">Filtered batting comfort summary</div>
+                                        </div>
+
+                                        <div className="flex items-center gap-2">
+                                          <span className="bg-amber-950/80 border border-amber-500/60 text-amber-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            Runs {comfortLevelStats.total.runs}
+                                          </span>
+                                          <span className="bg-emerald-950/80 border border-emerald-500/60 text-emerald-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            WKT {comfortLevelStats.total.wkt}
+                                          </span>
+                                          <span className="bg-cyan-950/80 border border-cyan-500/60 text-cyan-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            STR {comfortLevelStats.total.str}
+                                          </span>
+                                          <span className="bg-indigo-950/80 border border-indigo-500/60 text-indigo-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            AVG {comfortLevelStats.total.avg}
+                                          </span>
+                                        </div>
+                                      </div>
+
+                                      <div className="text-xs font-bold text-white uppercase mb-2">COMFORT LEVEL AGAINST BOWLING TYPE</div>
+
+                                      <div className="w-full overflow-hidden rounded-lg border border-slate-800 bg-[#0b1726]">
+                                        <table className="w-full text-left border-collapse text-[11px] font-sans text-slate-200">
+                                          <thead>
+                                            <tr className="bg-[#0f2438] text-slate-300 uppercase tracking-wider text-[10px] border-b border-slate-800">
+                                              <th className="py-2.5 px-4 font-bold">TYPE</th>
+                                              <th className="py-2.5 px-3 text-center font-bold">OVERS</th>
+                                              <th className="py-2.5 px-3 text-center font-bold">RUNS</th>
+                                              <th className="py-2.5 px-3 text-center font-bold">WKT</th>
+                                              <th className="py-2.5 px-3 text-center font-bold">STR</th>
+                                              <th className="py-2.5 px-3 text-center font-bold">AVG</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody className="divide-y divide-slate-800/80 font-semibold">
+                                            {comfortLevelStats.rows.map((r, rIdx) => (
+                                              <tr key={rIdx} className="hover:bg-slate-800/40 transition-colors">
+                                                <td className="py-2.5 px-4 text-cyan-300 font-bold">{r.type}</td>
+                                                <td className="py-2.5 px-3 text-center text-slate-300">{r.overs}</td>
+                                                <td className="py-2.5 px-3 text-center text-cyan-300 font-extrabold">{r.runs}</td>
+                                                <td className="py-2.5 px-3 text-center text-emerald-400 font-bold">{r.wkt}</td>
+                                                <td className="py-2.5 px-3 text-center text-slate-300">{r.str}</td>
+                                                <td className="py-2.5 px-3 text-center text-slate-300">{r.avg}</td>
+                                              </tr>
+                                            ))}
+                                            <tr className="bg-[#0f2438] text-white font-extrabold border-t-2 border-slate-700">
+                                              <td className="py-2.5 px-4">Total</td>
+                                              <td className="py-2.5 px-3 text-center">{comfortLevelStats.total.overs}</td>
+                                              <td className="py-2.5 px-3 text-center text-cyan-300">{comfortLevelStats.total.runs}</td>
+                                              <td className="py-2.5 px-3 text-center text-emerald-400">{comfortLevelStats.total.wkt}</td>
+                                              <td className="py-2.5 px-3 text-center">{comfortLevelStats.total.str}</td>
+                                              <td className="py-2.5 px-3 text-center">{comfortLevelStats.total.avg}</td>
+                                            </tr>
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+
+                            {previewSlide !== cGfxNum && (
+                              <div
+                                id="slide-comfort-gfx-node"
+                                className="relative w-[900px] h-[525px] bg-[#f6f4eb] rounded-lg p-10 overflow-hidden flex flex-col justify-between border border-slate-300 text-slate-900 select-none"
+                                style={{ fontFamily: 'sans-serif' }}
+                              >
+                                <div className="absolute top-0 left-0 w-[20px] h-full bg-[#0f172a] pointer-events-none" />
+
+                                <div className="pl-6 flex-1 flex flex-col justify-between">
+                                  <div>
+                                    <h1 className="text-2xl font-extrabold uppercase text-slate-950 tracking-tight">
+                                      {slide2Title}
+                                    </h1>
+
+                                    <div className="text-base font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2 mt-3 mb-4">
+                                      <span className="text-slate-950 text-sm">■</span> COMFORT LEVEL REPORT - GRAPHICAL
+                                    </div>
+                                  </div>
+
+                                  <div className="w-full bg-[#071320] border border-slate-800 rounded-xl p-4 shadow-xl flex-1 flex flex-col justify-between">
+                                    <div>
+                                      <div className="text-xs font-extrabold uppercase text-white tracking-wider">COMFORT LEVEL</div>
+                                      <div className="text-[10px] text-cyan-400/80 mb-3">Graphical comfort level against bowling type</div>
+
+                                      <div className="w-full bg-[#0d1d2e] border border-slate-800 rounded-lg p-3 mb-4 flex items-center justify-between">
+                                        <div>
+                                          <div className="text-sm font-extrabold text-white uppercase">{activeBatter.name}</div>
+                                          <div className="text-[10px] text-slate-400">Graphical comfort level summary</div>
+                                        </div>
+
+                                        <div className="flex items-center gap-2">
+                                          <span className="bg-amber-950/80 border border-amber-500/60 text-amber-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            Runs {comfortLevelStats.total.runs}
+                                          </span>
+                                          <span className="bg-emerald-950/80 border border-emerald-500/60 text-emerald-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            WKT {comfortLevelStats.total.wkt}
+                                          </span>
+                                          <span className="bg-cyan-950/80 border border-cyan-500/60 text-cyan-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            STR {comfortLevelStats.total.str}
+                                          </span>
+                                          <span className="bg-indigo-950/80 border border-indigo-500/60 text-indigo-300 text-xs px-3 py-1 rounded-full font-bold">
+                                            AVG {comfortLevelStats.total.avg}
+                                          </span>
+                                        </div>
+                                      </div>
+
+                                      <div className="text-xs font-bold text-white uppercase mb-2">COMFORT LEVEL</div>
+
+                                      <div className="w-full bg-[#0b1726] border border-slate-800 rounded-lg p-3 flex justify-center">
+                                        {renderComfortBarChart(comfortLevelStats.rows)}
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+
+                  </div>
+                )
+              )}
             </div>
 
             {/* Right Column: Match & Delivery Filters Panel */}
@@ -3748,49 +4129,49 @@ export default function App() {
                   </button>
                 </div>
 
-                {/* PHASE OF PLAY */}
+                {/* PHASE OF PLAY (Dynamically calculated based on match format) */}
                 <div className="space-y-2.5">
                   <div className="flex items-center justify-between text-xs">
-                    <span className="font-bold uppercase tracking-wider text-slate-300">Phase of Play</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-bold uppercase tracking-wider text-slate-300">Phase of Play</span>
+                      <span className="text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded font-mono">
+                        {phaseConfig.formatName}
+                      </span>
+                    </div>
                     <span className="text-blue-400 font-semibold text-[11px]">
-                      {selectedPhase === 'All Phases (1–20)' ? 'All Phases Selected' : `${selectedPhase.split(' ')[0]} Selected`}
+                      {selectedPhase === 'All'
+                        ? 'All Phases'
+                        : (phaseConfig.phases.find(p => p.id === selectedPhase)?.label || selectedPhase)}
                     </span>
                   </div>
 
-                  {/* All Phases (1-20) */}
+                  {/* All Phases Button */}
                   <button
-                    onClick={() => handlePhaseSelect('All Phases (1–20)')}
-                    className={`w-full py-2.5 px-3 rounded-lg text-xs font-semibold text-center transition-all border ${
-                      selectedPhase === 'All Phases (1–20)'
-                        ? 'bg-blue-600 text-white border-blue-500 shadow-md shadow-blue-600/20'
-                        : 'bg-[#111927] hover:bg-[#162235] text-slate-300 border-[#1e293b]'
-                    }`}
+                    onClick={() => handlePhaseSelect('All')}
+                    className={`w-full py-2.5 px-3 rounded-lg text-xs font-semibold text-center transition-all border ${selectedPhase === 'All'
+                      ? 'bg-blue-600 text-white border-blue-500 shadow-md shadow-blue-600/20 font-bold'
+                      : 'bg-[#111927] hover:bg-[#162235] text-slate-300 border-[#1e293b]'
+                      }`}
                   >
-                    All Phases (1–20)
+                    All Phases (1–{phaseConfig.maxOvers})
                   </button>
 
-                  {/* 2x2 Grid of specific phases */}
+                  {/* Format-specific dynamic Phase Buttons */}
                   <div className="grid grid-cols-2 gap-2">
-                    {[
-                      { id: 'Powerplay (1–6)', label: 'Powerplay (1–6)' },
-                      { id: 'Middle (7–10)', label: 'Middle (7–10)' },
-                      { id: 'Middle-Late (11–15)', label: 'Middle-Late (11–15)' },
-                      { id: 'Death Overs (16–20)', label: 'Death Overs (16–20)' }
-                    ].map((phase) => {
+                    {phaseConfig.phases.map((phase) => {
                       const isActive = selectedPhase === phase.id;
                       return (
                         <button
                           key={phase.id}
                           onClick={() => handlePhaseSelect(phase.id)}
-                          className={`relative py-2.5 px-3 rounded-lg text-xs font-semibold text-center transition-all border flex items-center justify-center ${
-                            isActive
-                              ? 'bg-blue-600 text-white border-blue-500 shadow-md shadow-blue-600/20'
-                              : 'bg-[#111927] hover:bg-[#162235] text-slate-300 border-[#1e293b]'
-                          }`}
+                          className={`relative py-2.5 px-2.5 rounded-lg text-xs font-semibold text-center transition-all border flex items-center justify-center ${isActive
+                            ? 'bg-blue-600 text-white border-blue-500 shadow-md shadow-blue-600/20 font-bold'
+                            : 'bg-[#111927] hover:bg-[#162235] text-slate-300 border-[#1e293b]'
+                            }`}
                         >
-                          <span>{phase.label}</span>
+                          <span className="truncate">{phase.label}</span>
                           {isActive && (
-                            <span className="w-1.5 h-1.5 rounded-full bg-blue-200 ml-1.5 inline-block" />
+                            <span className="w-1.5 h-1.5 rounded-full bg-blue-200 ml-1.5 inline-block shrink-0" />
                           )}
                         </button>
                       );
@@ -3811,7 +4192,7 @@ export default function App() {
                     <input
                       type="range"
                       min={1}
-                      max={20}
+                      max={phaseConfig.maxOvers}
                       step={1}
                       value={oversRange.max}
                       onChange={(e) => {
@@ -3821,11 +4202,9 @@ export default function App() {
                       className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
                     />
                     <div className="flex justify-between text-[10px] text-slate-500 font-semibold px-0.5 mt-1">
-                      <span>1</span>
-                      <span>6</span>
-                      <span>10</span>
-                      <span>15</span>
-                      <span>20</span>
+                      {phaseConfig.sliderTicks.map((tick) => (
+                        <span key={tick}>{tick}</span>
+                      ))}
                     </div>
                   </div>
                 </div>
@@ -3842,11 +4221,10 @@ export default function App() {
                         <button
                           key={item}
                           onClick={() => setSelectedBatterHand(item)}
-                          className={`py-2 rounded-lg text-xs font-semibold transition-all ${
-                            isActive
-                              ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30 font-bold'
-                              : 'text-slate-400 hover:text-white'
-                          }`}
+                          className={`py-2 rounded-lg text-xs font-semibold transition-all ${isActive
+                            ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30 font-bold'
+                            : 'text-slate-400 hover:text-white'
+                            }`}
                         >
                           {item}
                         </button>
@@ -3867,11 +4245,10 @@ export default function App() {
                         <button
                           key={item}
                           onClick={() => setSelectedBowlingCategory(item)}
-                          className={`py-2 rounded-lg text-xs font-semibold transition-all ${
-                            isActive
-                              ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30 font-bold'
-                              : 'text-slate-400 hover:text-white'
-                          }`}
+                          className={`py-2 rounded-lg text-xs font-semibold transition-all ${isActive
+                            ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30 font-bold'
+                            : 'text-slate-400 hover:text-white'
+                            }`}
                         >
                           {item}
                         </button>
@@ -3892,11 +4269,10 @@ export default function App() {
                         <button
                           key={item}
                           onClick={() => setSelectedInningsContext(item)}
-                          className={`py-2 rounded-lg text-xs font-semibold transition-all ${
-                            isActive
-                              ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30 font-bold'
-                              : 'text-slate-400 hover:text-white'
-                          }`}
+                          className={`py-2 rounded-lg text-xs font-semibold transition-all ${isActive
+                            ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30 font-bold'
+                            : 'text-slate-400 hover:text-white'
+                            }`}
                         >
                           {item}
                         </button>
