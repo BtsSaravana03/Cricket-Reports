@@ -420,6 +420,15 @@ export default function App() {
     resetMatchForm();
   };
 
+  const handleMatchChange = (matchId) => {
+    if (!matchId) {
+      setSelectedMatchIds([]);
+    } else {
+      setSelectedMatchIds([String(matchId)]);
+    }
+    resetMatchForm();
+  };
+
   const setAllMatches = (ids) => {
     setSelectedMatchIds(ids.map(String));
     resetMatchForm();
