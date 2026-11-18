@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import * as htmlToImage from 'html-to-image';
 import pptxgen from 'pptxgenjs';
@@ -2413,24 +2413,42 @@ export default function App() {
                     </select>
                   </div>
 
-                  {/* Match Dropdown */}
+                  {/* Match multi-select dropdown */}
                   <div>
                     <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                      Match
+                      Matches
                     </label>
-                    <select
-                      disabled={!selectedCompId}
-                      value={selectedMatchId}
-                      onChange={(e) => handleMatchChange(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-lg p-2.5 text-sm text-slate-100 focus:outline-none disabled:opacity-40"
-                    >
-                      <option value="">-- Choose Match --</option>
-                      {matches.map((m) => (
-                        <option key={m.ID} value={m.ID}>
-                          {m.MatchNameDate || m.MatchNameShort || m.MatchName}
-                        </option>
-                      ))}
-                    </select>
+                    <details className="relative group">
+                      <summary
+                        className={`list-none w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-sm text-slate-100 cursor-pointer flex items-center justify-between ${!selectedCompId ? 'opacity-40 pointer-events-none' : ''}`}
+                      >
+                        <span className="truncate">
+                          {selectedMatchIds.length === 0
+                            ? '-- Choose Matches --'
+                            : selectedMatchIds.length === 1
+                              ? (matches.find((m) => String(m.ID) === selectedMatchIds[0])?.MatchNameDate || matches.find((m) => String(m.ID) === selectedMatchIds[0])?.MatchName || '1 match selected')
+                              : `${selectedMatchIds.length} matches selected`}
+                        </span>
+                        <ChevronRight className="w-4 h-4 text-slate-400 rotate-90 shrink-0" />
+                      </summary>
+                      <div className="absolute z-40 mt-1 w-full max-h-72 overflow-y-auto bg-slate-950 border border-slate-700 rounded-lg shadow-2xl p-2 space-y-1">
+                        <div className="flex items-center justify-between px-2 pb-2 border-b border-slate-800 text-xs">
+                          <button type="button" onClick={() => setAllMatches(matches.map((m) => m.ID))} className="text-blue-400 hover:text-blue-300 font-semibold">Select all</button>
+                          <button type="button" onClick={() => setAllMatches([])} className="text-slate-400 hover:text-white font-semibold">Clear</button>
+                        </div>
+                        {matches.map((m) => (
+                          <label key={m.ID} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-slate-800 cursor-pointer text-sm text-slate-200">
+                            <input
+                              type="checkbox"
+                              className="accent-blue-500 rounded"
+                              checked={selectedMatchIds.includes(String(m.ID))}
+                              onChange={() => toggleMatch(m.ID)}
+                            />
+                            <span className="truncate">{m.MatchNameDate || m.MatchNameShort || m.MatchName}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </details>
                   </div>
 
                   {/* Client Template Profile */}
@@ -2471,13 +2489,13 @@ export default function App() {
                   <div className="text-xs text-slate-400">
                     {isDataFetched && (
                       <span className="text-emerald-400 flex items-center gap-1 font-medium">
-                        <CheckCircle2 className="w-4 h-4" /> Loaded {ballData.length} deliveries for match #{selectedMatchId}
+                        <CheckCircle2 className="w-4 h-4" /> Loaded {ballData.length} deliveries {isMultiMatch ? `from ${multiMatchData.length} matches` : `for match #${selectedMatchId}`}
                       </span>
                     )}
                   </div>
 
                   <button
-                    disabled={!selectedMatchId || loading}
+                    disabled={!selectedMatchIds.length || loading}
                     onClick={handleGenerateReport}
                     className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white font-semibold px-6 py-2.5 rounded-lg shadow-lg shadow-blue-500/20 text-sm transition-all flex items-center space-x-2"
                   >
